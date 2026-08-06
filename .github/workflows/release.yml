@@ -191,9 +191,17 @@ jobs:
             --header "Authorization: Bearer $GITHUB_META_TOKEN" \
             https://api.github.com/meta \
             | jq -r '.ssh_keys[]' >"$meta_keys"
-          ssh-keyscan -t rsa,ecdsa,ed25519 github.com 2>/dev/null >"$scanned_keys"
+          ssh-keyscan -q -t rsa,ecdsa,ed25519 github.com 2>/dev/null >"$scanned_keys"
           : >"$known_hosts"
-          while read -r _host algorithm key; do
+          while read -r _host algorithm key extra; do
+            if [[ -z "$_host" || "${_host:0:1}" == "#" ]]; then
+              continue
+            fi
+            if [[ "$_host" != "github.com" || -z "$algorithm" \
+              || -z "$key" || -n "${extra:-}" ]]; then
+              echo "::error::ssh-keyscan returned a malformed host-key line"
+              exit 1
+            fi
             grep -Fqx "$algorithm $key" "$meta_keys" || {
               echo "::error::ssh-keyscan returned a key absent from GitHub authenticated metadata"
               exit 1
@@ -215,7 +223,7 @@ jobs:
             echo "::error::source tag resolves to $tag_sha, not $COLONY_SOURCE_SHA"
             exit 1
           }
-          git -C "$source_dir" checkout --detach "$COLONY_SOURCE_SHA"
+          GIT_LFS_SKIP_SMUDGE=1 git -C "$source_dir" checkout --detach "$COLONY_SOURCE_SHA"
           [[ "$(git -C "$source_dir" rev-parse HEAD)" == "$COLONY_SOURCE_SHA" ]]
           echo "source_dir=$source_dir" >>"$GITHUB_OUTPUT"
 
@@ -1023,9 +1031,17 @@ jobs:
             --header "Authorization: Bearer $GITHUB_META_TOKEN" \
             https://api.github.com/meta \
             | jq -r '.ssh_keys[]' >"$meta_keys"
-          ssh-keyscan -t rsa,ecdsa,ed25519 github.com 2>/dev/null >"$scanned_keys"
+          ssh-keyscan -q -t rsa,ecdsa,ed25519 github.com 2>/dev/null >"$scanned_keys"
           : >"$known_hosts"
-          while read -r _host algorithm key; do
+          while read -r _host algorithm key extra; do
+            if [[ -z "$_host" || "${_host:0:1}" == "#" ]]; then
+              continue
+            fi
+            if [[ "$_host" != "github.com" || -z "$algorithm" \
+              || -z "$key" || -n "${extra:-}" ]]; then
+              echo "::error::ssh-keyscan returned a malformed host-key line"
+              exit 1
+            fi
             grep -Fqx "$algorithm $key" "$meta_keys" || {
               echo "::error::ssh-keyscan returned a key absent from GitHub authenticated metadata"
               exit 1

@@ -327,6 +327,53 @@ test("GitHub host-key metadata requests use a step-scoped built-in token", () =>
   );
 });
 
+test("SSH host-key verification suppresses and ignores scanner banners", () => {
+  const sourceBuild = job("source_build", "apple_sign");
+  const feed = job("feed", "deploy");
+  const sourceCheckout = sourceBuild.slice(
+    sourceBuild.indexOf("      - id: source"),
+    sourceBuild.indexOf("      - name: Bind source"),
+  );
+  const feedPromotion = feed.slice(
+    feed.indexOf("      - id: feed"),
+    feed.indexOf("      - uses: actions/upload-pages-artifact"),
+  );
+
+  for (const metadataStep of [sourceCheckout, feedPromotion]) {
+    assert.match(metadataStep, /ssh-keyscan -q -t rsa,ecdsa,ed25519 github\.com/);
+    assert.match(
+      metadataStep,
+      /while read -r _host algorithm key extra; do(?:.|\n)*?\[\[ -z "\$_host" \|\| "\$\{_host:0:1\}" == "#" \]\](?:.|\n)*?continue/,
+      "scanner comments and blank lines must never enter authenticated key comparison",
+    );
+  }
+  assert.equal(
+    workflow.match(/ssh-keyscan -q -t rsa,ecdsa,ed25519 github\.com/g)?.length,
+    2,
+    "both deploy-key paths must suppress ssh-keyscan banners",
+  );
+});
+
+test("detached monorepo checkout never hydrates unrelated Git LFS payloads", () => {
+  const sourceBuild = job("source_build", "apple_sign");
+  const sourceCheckout = sourceBuild.slice(
+    sourceBuild.indexOf("      - id: source"),
+    sourceBuild.indexOf("      - name: Bind source"),
+  );
+
+  assert.match(
+    sourceCheckout,
+    /git -C "\$source_dir" fetch --no-tags --depth=1 origin \\\n\s+"\$COLONY_SOURCE_REF:\$COLONY_SOURCE_REF"/,
+    "the validated source tag must remain an explicit no-tags fetch",
+  );
+  assert.match(
+    sourceCheckout,
+    /GIT_LFS_SKIP_SMUDGE=1 git -C "\$source_dir" checkout --detach "\$COLONY_SOURCE_SHA"/,
+    "detached checkout must not hydrate unrelated monorepo LFS objects",
+  );
+  assert.equal(workflow.match(/GIT_LFS_SKIP_SMUDGE=1/g)?.length, 1);
+});
+
 test("untrusted source output crosses only digest-checked fresh-runner artifacts", () => {
   const sourceBuild = job("source_build", "apple_sign");
   assert.match(job("apple_sign", "updater_sign"), /needs:\s*\[validate, source_build\]/);
