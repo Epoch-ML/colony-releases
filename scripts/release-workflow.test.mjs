@@ -19,7 +19,7 @@ test("public releases build an exact verified source revision on universal macOS
   assert.match(trigger, /workflow_dispatch:/);
   assert.doesNotMatch(trigger, /\n\s+push:/);
   assert.match(workflow, /runs-on:\s*macos-15/);
-  assert.equal(workflow.match(/runs-on:\s*ubuntu-24\.04/g)?.length, 4);
+  assert.equal(workflow.match(/runs-on:\s*ubuntu-24\.04/g)?.length, 5);
   assert.doesNotMatch(workflow, /runs-on:\s*ubuntu-latest/);
   assert.match(workflow, /git init --ref-format=reftable/);
   assert.match(workflow, /api\.github\.com\/meta/);
@@ -32,13 +32,18 @@ test("public releases build an exact verified source revision on universal macOS
     "all three shipped JavaScript dependency trees reject moderate advisories",
   );
   assert.doesNotMatch(workflow, /npm audit --omit=dev --audit-level=high/);
+  assert.equal(
+    workflow.match(/^\s+npm audit --audit-level=moderate$/gm)?.length,
+    1,
+    "the public release boundary must reject development-tool advisories too",
+  );
   assert.match(
     workflow,
     /npm audit --omit=dev --audit-level=moderate --prefix "\$SOURCE_DIR\/ztc-web-client"/,
   );
   assert.equal(
     workflow.match(/node-version:\s*"22\.23\.2"/g)?.length,
-    5,
+    6,
     "every JavaScript boundary must use the exact Node patch bundled into Colony",
   );
   assert.match(workflow, /COLONY_RUNTIME_NODE_VERSION:\s*v22\.23\.2/);
@@ -67,6 +72,9 @@ test("public releases build an exact verified source revision on universal macOS
       "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
       "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
+      "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+      "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
       "actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa",
       "actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b",
       "actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
@@ -76,7 +84,7 @@ test("public releases build an exact verified source revision on universal macOS
   );
   assert.equal(
     workflow.match(/persist-credentials:\s*false/g)?.length,
-    5,
+    6,
     "no checkout may persist a releases-repository token",
   );
   assert.match(
@@ -168,8 +176,8 @@ test("immutable assets are verified over HTTPS before the Pages manifest moves",
   assert.match(workflow, /actions\/deploy-pages/);
   assert.match(
     workflow,
-    /deploy:\n(?:.|\n)*?needs: publish(?:.|\n)*?name: github-pages(?:.|\n)*?actions\/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e/,
-    "Pages deployment must use its dedicated protected environment after publication",
+    /deploy:\n(?:.|\n)*?needs: feed(?:.|\n)*?name: github-pages(?:.|\n)*?actions\/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e/,
+    "Pages deployment must use its dedicated protected environment after feed promotion",
   );
 
   const releaseIndex = workflow.indexOf("gh release create");
@@ -223,7 +231,8 @@ test("private release credentials are isolated from source build and test phases
   const sourceBuild = job("source_build", "apple_sign");
   const appleSign = job("apple_sign", "updater_sign");
   const updaterSign = job("updater_sign", "publish");
-  const publish = job("publish", "deploy");
+  const publish = job("publish", "feed");
+  const feed = job("feed", "deploy");
 
   assert.match(sourceBuild, /permissions:\n\s+contents:\s*read/);
   assert.match(sourceBuild, /environment:\s*colony-source/);
@@ -239,19 +248,26 @@ test("private release credentials are isolated from source build and test phases
   assert.doesNotMatch(updaterSign, /ZERG_SOURCE_DEPLOY_KEY|secrets\.COLONY_APPLE_|SOURCE_DIR|zerg\//);
 
   assert.match(publish, /runs-on:\s*ubuntu-24\.04/);
-  assert.match(publish, /environment:\s*colony-feed/);
   assert.match(publish, /permissions:\n\s+contents:\s*write/);
-  assert.match(publish, /secrets\.COLONY_FEED_DEPLOY_KEY/);
   assert.doesNotMatch(
     publish,
-    /ZERG_SOURCE_DEPLOY_KEY|TAURI_SIGNING_PRIVATE_KEY|secrets\.COLONY_APPLE_|source_repository/,
+    /ZERG_SOURCE_DEPLOY_KEY|TAURI_SIGNING_PRIVATE_KEY|secrets\.COLONY_APPLE_|source_repository|COLONY_FEED_DEPLOY_KEY|colony-feed/,
+  );
+
+  assert.match(feed, /runs-on:\s*ubuntu-24\.04/);
+  assert.match(feed, /environment:\s*colony-feed/);
+  assert.match(feed, /permissions:\n\s+contents:\s*read/);
+  assert.match(feed, /secrets\.COLONY_FEED_DEPLOY_KEY/);
+  assert.doesNotMatch(
+    feed,
+    /contents:\s*write|github\.token|GH_TOKEN|gh release|ZERG_SOURCE_DEPLOY_KEY|TAURI_SIGNING_PRIVATE_KEY|secrets\.COLONY_APPLE_|source_repository/,
   );
   assert.equal(
     workflow.match(/secrets\.COLONY_FEED_DEPLOY_KEY/g)?.length,
     1,
-    "only the publication job's feed step may receive the release-data deploy key",
+    "only the isolated feed job may receive the release-data deploy key",
   );
-  for (const credentialFreeJob of [sourceBuild, appleSign, updaterSign]) {
+  for (const credentialFreeJob of [sourceBuild, appleSign, updaterSign, publish]) {
     assert.doesNotMatch(credentialFreeJob, /COLONY_FEED_DEPLOY_KEY|colony-feed/);
   }
   assert.match(
@@ -261,14 +277,40 @@ test("private release credentials are isolated from source build and test phases
   assert.match(workflow, /base64 --decode "\$updater_key_file"/);
 });
 
+test("GitHub Release write authority never shares a runner with the feed deploy key", () => {
+  const publish = job("publish", "feed");
+  const feed = job("feed", "deploy");
+
+  assert.match(publish, /permissions:\n\s+contents:\s*write/);
+  assert.doesNotMatch(
+    publish,
+    /environment:\s*colony-feed|COLONY_FEED_DEPLOY_KEY|refs\/heads\/release-data|update-feed\.mjs/,
+    "the release publication runner must not receive feed branch authority",
+  );
+  assert.match(feed, /needs:\s*\[validate, publish\]/);
+  assert.match(feed, /environment:\s*colony-feed/);
+  assert.match(feed, /permissions:\n\s+contents:\s*read/);
+  assert.match(feed, /COLONY_FEED_DEPLOY_KEY/);
+  assert.doesNotMatch(
+    feed,
+    /contents:\s*write|github\.token|GH_TOKEN|gh release (?:create|upload|edit)/,
+    "the feed runner must not receive GitHub Release write authority",
+  );
+});
+
 test("untrusted source output crosses only digest-checked fresh-runner artifacts", () => {
   const sourceBuild = job("source_build", "apple_sign");
   assert.match(job("apple_sign", "updater_sign"), /needs:\s*\[validate, source_build\]/);
   assert.match(job("updater_sign", "publish"), /needs:\s*\[validate, apple_sign\]/);
-  assert.match(job("publish", "deploy"), /needs:\s*\[validate, updater_sign\]/);
+  assert.match(job("publish", "feed"), /needs:\s*\[validate, updater_sign\]/);
+  assert.match(job("feed", "deploy"), /needs:\s*\[validate, publish\]/);
   assert.match(workflow, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/);
   assert.match(workflow, /actions\/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0/);
   assert.match(workflow, /shasum -a 256 -c/);
+  assert.match(
+    job("feed", "deploy"),
+    /Bind the feed candidate to the immutable public release(?:.|\n)*?releases\/download\/\$encoded_tag\/latest\.json(?:.|\n)*?cmp "\$RELEASE_DIR\/latest\.json" "\$published_manifest"/,
+  );
   assert.equal(
     workflow.match(/node scripts\/app-archive-policy\.mjs "\$(?:archive|transport)"/g)?.length,
     3,
@@ -307,31 +349,34 @@ test("request branches stay unprivileged and live feeds publish outside protecte
   const sourceBuild = job("source_build", "apple_sign");
   const appleSign = job("apple_sign", "updater_sign");
   const updaterSign = job("updater_sign", "publish");
-  const publish = job("publish", "deploy");
+  const publish = job("publish", "feed");
+  const feed = job("feed", "deploy");
   const deploy = job("deploy", "verify_live");
   const verifyLive = job("verify_live");
 
   assert.match(job("validate", "source_build"), /GITHUB_REF.*refs\/heads\/main/);
-  for (const protectedJob of [sourceBuild, appleSign, updaterSign, publish, deploy, verifyLive]) {
+  for (const protectedJob of [sourceBuild, appleSign, updaterSign, publish, feed, deploy, verifyLive]) {
     assert.match(
       protectedJob,
       /if:\s*github\.ref == 'refs\/heads\/main'/,
       "only protected main may reach a release or deployment boundary",
     );
   }
-  assert.match(publish, /refs\/heads\/release-data/);
-  assert.match(publish, /HEAD:refs\/heads\/release-data/);
-  assert.match(publish, /environment:\s*colony-feed/);
-  assert.match(publish, /FEED_DEPLOY_KEY:\s*\$\{\{ secrets\.COLONY_FEED_DEPLOY_KEY \}\}/);
-  assert.match(publish, /StrictHostKeyChecking=yes/);
-  assert.match(publish, /git@github\.com:\$\{GITHUB_REPOSITORY\}\.git/);
+  assert.match(feed, /refs\/heads\/release-data/);
+  assert.match(feed, /HEAD:refs\/heads\/release-data/);
+  assert.match(feed, /environment:\s*colony-feed/);
+  assert.match(feed, /FEED_DEPLOY_KEY:\s*\$\{\{ secrets\.COLONY_FEED_DEPLOY_KEY \}\}/);
+  assert.match(feed, /StrictHostKeyChecking=yes/);
+  assert.match(feed, /git@github\.com:\$\{GITHUB_REPOSITORY\}\.git/);
   assert.match(
-    publish,
+    feed,
     /node scripts\/update-feed\.mjs \\\n\s+"\$COLONY_CHANNEL" "\$RELEASE_DIR\/latest\.json" "\$data_repo\/site"/,
   );
-  assert.match(publish, /site\/\$COLONY_CHANNEL\/releases/);
-  assert.doesNotMatch(publish, /cp "\$RELEASE_DIR\/latest\.json"/);
-  assert.doesNotMatch(publish, /HEAD:main|git add "?site\//);
+  assert.match(feed, /site\/\$COLONY_CHANNEL\/releases/);
+  assert.doesNotMatch(feed, /cp "\$RELEASE_DIR\/latest\.json"/);
+  assert.doesNotMatch(feed, /HEAD:main|git add "?site\//);
+  assert.doesNotMatch(publish, /release-data|COLONY_FEED_DEPLOY_KEY|colony-feed/);
+  assert.match(deploy, /needs:\s*feed/);
   assert.match(deploy, /actions\/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e/);
   assert.match(verifyLive, /needs:\s*\[validate, deploy\]/);
   assert.match(verifyLive, /curl --fail --show-error --location/);
