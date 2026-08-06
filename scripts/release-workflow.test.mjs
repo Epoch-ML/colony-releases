@@ -260,7 +260,7 @@ test("private release credentials are isolated from source build and test phases
   assert.match(feed, /secrets\.COLONY_FEED_DEPLOY_KEY/);
   assert.doesNotMatch(
     feed,
-    /contents:\s*write|github\.token|GH_TOKEN|gh release|ZERG_SOURCE_DEPLOY_KEY|TAURI_SIGNING_PRIVATE_KEY|secrets\.COLONY_APPLE_|source_repository/,
+    /contents:\s*write|GH_TOKEN|gh release|ZERG_SOURCE_DEPLOY_KEY|TAURI_SIGNING_PRIVATE_KEY|secrets\.COLONY_APPLE_|source_repository/,
   );
   assert.equal(
     workflow.match(/secrets\.COLONY_FEED_DEPLOY_KEY/g)?.length,
@@ -293,8 +293,37 @@ test("GitHub Release write authority never shares a runner with the feed deploy 
   assert.match(feed, /COLONY_FEED_DEPLOY_KEY/);
   assert.doesNotMatch(
     feed,
-    /contents:\s*write|github\.token|GH_TOKEN|gh release (?:create|upload|edit)/,
+    /contents:\s*write|GH_TOKEN|gh release (?:create|upload|edit)/,
     "the feed runner must not receive GitHub Release write authority",
+  );
+});
+
+test("GitHub host-key metadata requests use a step-scoped built-in token", () => {
+  const sourceBuild = job("source_build", "apple_sign");
+  const feed = job("feed", "deploy");
+  const sourceCheckout = sourceBuild.slice(
+    sourceBuild.indexOf("      - id: source"),
+    sourceBuild.indexOf("      - name: Bind source"),
+  );
+  const feedPromotion = feed.slice(
+    feed.indexOf("      - id: feed"),
+    feed.indexOf("      - uses: actions/upload-pages-artifact"),
+  );
+
+  assert.doesNotMatch(sourceBuild.slice(0, sourceBuild.indexOf("    steps:")), /GITHUB_META_TOKEN/);
+  assert.doesNotMatch(feed.slice(0, feed.indexOf("    steps:")), /GITHUB_META_TOKEN/);
+  for (const metadataStep of [sourceCheckout, feedPromotion]) {
+    assert.match(metadataStep, /GITHUB_META_TOKEN:\s*\$\{\{ github\.token \}\}/);
+    assert.match(
+      metadataStep,
+      /--header "Authorization: Bearer \$GITHUB_META_TOKEN"(?:.|\n)*?https:\/\/api\.github\.com\/meta/,
+      "GitHub host-key metadata must not consume a shared runner's unauthenticated API quota",
+    );
+  }
+  assert.equal(
+    workflow.match(/GITHUB_META_TOKEN:\s*\$\{\{ github\.token \}\}/g)?.length,
+    2,
+    "only the two SSH host-key verification steps may receive the built-in token",
   );
 });
 
