@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "product": "Colony",
+  "channel": "preview",
+  "version": "0.1.1-preview.3",
+  "release_tag": "colony-desktop-preview-v0.1.1-preview.3",
+  "source_repository": "Epoch-ML/zerg",
+  "source_sha": "284278ecdbdb46be7915949cc8f2ace826cc68c6",
+  "source_ref": "refs/tags/colony-desktop-preview-v0.1.1-preview.3",
+  "requested_at": "2026-08-06T11:27:38.000Z"
+}
