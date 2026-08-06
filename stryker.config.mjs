@@ -13,6 +13,7 @@ const config = {
     'scripts/update-feed.mjs:12-198',
     'scripts/app-archive-policy.mjs:12-326',
     'scripts/mac-bundle-policy.mjs:12-67',
+    'scripts/deploy-pages.mjs:15-278',
   ],
   mutator: {
     excludedMutations: ['StringLiteral'],
