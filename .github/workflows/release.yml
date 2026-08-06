@@ -350,12 +350,42 @@ jobs:
           tar -xzf "$arm_archive" -C "$provenance/arm64"
           tar -xzf "$x64_archive" -C "$provenance/x64"
           staged_node="$SOURCE_DIR/colony/src-tauri/resources/runtime/node"
+          arm_node="$provenance/arm64/node-v22.23.2-darwin-arm64/bin/node"
+          x64_node="$provenance/x64/node-v22.23.2-darwin-x64/bin/node"
+          codesign --verify --verbose=4 "$staged_node"
+          codesign_details="$(codesign -dvvv "$staged_node" 2>&1)"
+          grep -Fx 'Signature=adhoc' <<<"$codesign_details" >/dev/null || {
+            echo "::error::staged Node is not signed with the expected ad-hoc identity"
+            exit 1
+          }
+          codesign -d --entitlements "$provenance/staged-node-entitlements.plist" --xml "$staged_node"
+          plutil -convert json -o - \
+            "$SOURCE_DIR/colony/src-tauri/JitRuntimeEntitlements.plist" \
+            | jq -S . >"$provenance/expected-node-entitlements.json"
+          plutil -convert json -o - "$provenance/staged-node-entitlements.plist" \
+            | jq -S . >"$provenance/staged-node-entitlements.json"
+          cmp "$provenance/expected-node-entitlements.json" \
+            "$provenance/staged-node-entitlements.json"
           lipo -thin arm64 "$staged_node" -output "$provenance/staged-node-arm64"
           lipo -thin x86_64 "$staged_node" -output "$provenance/staged-node-x64"
-          cmp "$provenance/staged-node-arm64" \
-            "$provenance/arm64/node-v22.23.2-darwin-arm64/bin/node"
-          cmp "$provenance/staged-node-x64" \
-            "$provenance/x64/node-v22.23.2-darwin-x64/bin/node"
+          normalize_macho() {
+            local input="$1"
+            local output="$2"
+            cp "$input" "$output"
+            codesign --remove-signature "$output"
+          }
+          normalize_macho "$provenance/staged-node-arm64" \
+            "$provenance/staged-node-arm64-unsigned"
+          normalize_macho "$arm_node" \
+            "$provenance/upstream-node-arm64-unsigned"
+          normalize_macho "$provenance/staged-node-x64" \
+            "$provenance/staged-node-x64-unsigned"
+          normalize_macho "$x64_node" \
+            "$provenance/upstream-node-x64-unsigned"
+          cmp "$provenance/staged-node-arm64-unsigned" \
+            "$provenance/upstream-node-arm64-unsigned"
+          cmp "$provenance/staged-node-x64-unsigned" \
+            "$provenance/upstream-node-x64-unsigned"
 
       - id: app
         name: Resolve, audit, and smoke-test the source-built app
