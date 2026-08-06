@@ -298,6 +298,35 @@ test("GitHub Release write authority never shares a runner with the feed deploy 
   );
 });
 
+test("GitHub host-key metadata requests use a step-scoped built-in token", () => {
+  const sourceBuild = job("source_build", "apple_sign");
+  const feed = job("feed", "deploy");
+  const sourceCheckout = sourceBuild.slice(
+    sourceBuild.indexOf("      - id: source"),
+    sourceBuild.indexOf("      - name: Bind source"),
+  );
+  const feedPromotion = feed.slice(
+    feed.indexOf("      - id: feed"),
+    feed.indexOf("      - uses: actions/upload-pages-artifact"),
+  );
+
+  assert.doesNotMatch(sourceBuild.slice(0, sourceBuild.indexOf("    steps:")), /GITHUB_META_TOKEN/);
+  assert.doesNotMatch(feed.slice(0, feed.indexOf("    steps:")), /GITHUB_META_TOKEN/);
+  for (const metadataStep of [sourceCheckout, feedPromotion]) {
+    assert.match(metadataStep, /GITHUB_META_TOKEN:\s*\$\{\{ github\.token \}\}/);
+    assert.match(
+      metadataStep,
+      /--header "Authorization: Bearer \$GITHUB_META_TOKEN"(?:.|\n)*?https:\/\/api\.github\.com\/meta/,
+      "GitHub host-key metadata must not consume a shared runner's unauthenticated API quota",
+    );
+  }
+  assert.equal(
+    workflow.match(/GITHUB_META_TOKEN:\s*\$\{\{ github\.token \}\}/g)?.length,
+    2,
+    "only the two SSH host-key verification steps may receive the built-in token",
+  );
+});
+
 test("untrusted source output crosses only digest-checked fresh-runner artifacts", () => {
   const sourceBuild = job("source_build", "apple_sign");
   assert.match(job("apple_sign", "updater_sign"), /needs:\s*\[validate, source_build\]/);
