@@ -403,7 +403,7 @@ test("GitHub host-key metadata requests use a step-scoped built-in token", () =>
   );
 });
 
-test("SSH host-key verification suppresses and ignores scanner banners", () => {
+test("SSH host-key verification uses portable bounded scans and ignores banners", () => {
   const sourceBuild = job("source_build", "apple_sign");
   const feed = job("feed", "deploy");
   const sourceCheckout = sourceBuild.slice(
@@ -416,7 +416,11 @@ test("SSH host-key verification suppresses and ignores scanner banners", () => {
   );
 
   for (const metadataStep of [sourceCheckout, feedPromotion]) {
-    assert.match(metadataStep, /ssh-keyscan -q -t rsa,ecdsa,ed25519 github\.com/);
+    assert.match(
+      metadataStep,
+      /ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github\.com 2>\/dev\/null/,
+      "macOS and Ubuntu must use only their shared ssh-keyscan option surface",
+    );
     assert.match(
       metadataStep,
       /while read -r _host algorithm key extra; do(?:.|\n)*?\[\[ -z "\$_host" \|\| "\$\{_host:0:1\}" == "#" \]\](?:.|\n)*?continue/,
@@ -424,10 +428,11 @@ test("SSH host-key verification suppresses and ignores scanner banners", () => {
     );
   }
   assert.equal(
-    workflow.match(/ssh-keyscan -q -t rsa,ecdsa,ed25519 github\.com/g)?.length,
+    workflow.match(/ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github\.com/g)?.length,
     2,
     "both deploy-key paths must suppress ssh-keyscan banners",
   );
+  assert.doesNotMatch(workflow, /ssh-keyscan -q/);
 });
 
 test("detached monorepo checkout never hydrates unrelated Git LFS payloads", () => {
