@@ -138,7 +138,7 @@ async function main() {
     notarized: process.env.COLONY_APPLE_NOTARIZED === "true",
     notes: process.env.COLONY_RELEASE_NOTES,
   });
-  process.stdout.write(`${JSON.stringify({ assets: result.assets.map(basename) })}\n`);
+  process.stdout.write(`${JSON.stringify({ assets: result.assets.map((path) => basename(path)) })}\n`);
 }
 
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

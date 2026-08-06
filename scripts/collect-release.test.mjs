@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
+import { promisify } from "node:util";
 
 import { collectReleasePayload } from "./collect-release.mjs";
 
 const temporaryDirectories = [];
 const sourceSha = "0123456789abcdef0123456789abcdef01234567";
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   await Promise.all(
@@ -127,6 +130,39 @@ test("public collection emits exact immutable assets and a dual-architecture upd
     outputDir: join(bundle.root, "fallback", "nested", "output"),
   }));
   assert.equal(fallback.manifest.notes, "");
+});
+
+test("public collection CLI reports exact asset names after a successful collection", async () => {
+  const bundle = await fixture();
+  const requestPath = join(bundle.root, "request.json");
+  await writeFile(requestPath, `${JSON.stringify(request())}\n`);
+
+  const { stdout, stderr } = await execFileAsync(process.execPath, [
+    new URL("./collect-release.mjs", import.meta.url).pathname,
+    requestPath,
+    bundle.inputDir,
+    bundle.outputDir,
+  ], {
+    env: {
+      ...process.env,
+      COLONY_APPLE_NOTARIZED: "false",
+      COLONY_RELEASE_DATE: request().requested_at,
+      COLONY_RELEASE_NOTES: "Colony preview",
+      COLONY_RELEASE_REPOSITORY: "Epoch-ML/colony-releases",
+      COLONY_RUNTIME_NODE_VERSION: "v22.23.2",
+    },
+  });
+
+  assert.equal(stderr, "");
+  assert.deepEqual(JSON.parse(stdout), {
+    assets: [
+      bundle.archive,
+      `${bundle.archive}.sig`,
+      bundle.dmg,
+      "checksums.txt",
+      "release-metadata.json",
+    ],
+  });
 });
 
 test("public collection fails closed for missing signatures and unnotarized stable payloads", async () => {
