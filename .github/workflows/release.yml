@@ -279,10 +279,13 @@ jobs:
         run: |
           set -euo pipefail
           npm --prefix "$SOURCE_DIR/ztc" run build
-          node --import tsx --test \
-            "$SOURCE_DIR/ztc/tests/unit/pane_child_ztc_launch.test.ts" \
-            "$SOURCE_DIR/ztc/tests/unit/plugin_public_surface_static.test.ts" \
-            "$SOURCE_DIR/ztc/tests/unit/plugin_runtime_registry.test.ts"
+          (
+            cd "$SOURCE_DIR/ztc"
+            node --import tsx --test \
+              "tests/unit/pane_child_ztc_launch.test.ts" \
+              "tests/unit/plugin_public_surface_static.test.ts" \
+              "tests/unit/plugin_runtime_registry.test.ts"
+          )
           npm --prefix "$SOURCE_DIR/ztc-web-client" run build:plugin
           (
             cd "$SOURCE_DIR/colony"
