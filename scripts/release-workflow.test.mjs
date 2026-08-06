@@ -260,6 +260,18 @@ test("Pages uses a deterministic artifact uploaded through an immutable direct a
   );
 });
 
+test("Pages deployment tolerates a bounded queue longer than the action default", () => {
+  const deploy = job("deploy", "verify_live");
+
+  assert.match(deploy, /timeout-minutes: 35/);
+  assert.match(
+    deploy,
+    /actions\/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e(?:.|\n)*?with:\n\s+timeout: 1800000/,
+    "the deployment may wait 30 minutes, while the job remains bounded at 35 minutes",
+  );
+  assert.doesNotMatch(deploy, /timeout: 600000/);
+});
+
 test("post-release retries verify and resume an exact immutable release", () => {
   const publish = job("publish", "feed");
   assert.doesNotMatch(workflow, /already exists; publish a higher version/);
