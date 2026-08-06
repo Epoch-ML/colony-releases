@@ -374,6 +374,26 @@ test("detached monorepo checkout never hydrates unrelated Git LFS payloads", () 
   assert.equal(workflow.match(/GIT_LFS_SKIP_SMUDGE=1/g)?.length, 1);
 });
 
+test("targeted ZTC TypeScript tests resolve the locked loader from the ZTC workspace", () => {
+  const sourceBuild = job("source_build", "apple_sign");
+  const testStep = sourceBuild.slice(
+    sourceBuild.indexOf("      - name: Test ZTC public runtime and Colony"),
+    sourceBuild.indexOf("      - name: Generate updater-enabled release config"),
+  );
+
+  assert.match(
+    testStep,
+    /npm --prefix "\$SOURCE_DIR\/ztc" run build\n\s+\(\n\s+cd "\$SOURCE_DIR\/ztc"\n\s+node --import tsx --test \\\n\s+"tests\/unit\/pane_child_ztc_launch\.test\.ts" \\\n\s+"tests\/unit\/plugin_public_surface_static\.test\.ts" \\\n\s+"tests\/unit\/plugin_runtime_registry\.test\.ts"\n\s+\)/,
+    "tsx must resolve from the exact locked ZTC dependency tree",
+  );
+  assert.doesNotMatch(testStep, /node --import tsx --test \\\n\s+"\$SOURCE_DIR\/ztc\//);
+  assert.match(
+    testStep,
+    /npm --prefix "\$SOURCE_DIR\/ztc-web-client" run build:plugin\n\s+\(\n\s+cd "\$SOURCE_DIR\/colony"\n\s+npx tsc --noEmit\n\s+npx tsc -p src\/colony\/ui\/tsconfig\.json --noEmit\n\s+npm test\n\s+npm run test:ui\n\s+\)\n\s+cargo test --locked/,
+    "the later Colony and Rust command boundaries must remain unchanged",
+  );
+});
+
 test("untrusted source output crosses only digest-checked fresh-runner artifacts", () => {
   const sourceBuild = job("source_build", "apple_sign");
   assert.match(job("apple_sign", "updater_sign"), /needs:\s*\[validate, source_build\]/);
