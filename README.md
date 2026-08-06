@@ -14,14 +14,18 @@ commit, checks out only the stated 40-character source SHA through a read-only
 deploy key, and tests, builds, and smoke-tests a universal macOS application on
 an unprivileged runner. Fresh runners then Apple-sign the app, updater-sign its
 archive, and publish the immutable GitHub Release. The publication runner
-downloads every asset over HTTPS and compares the bytes before committing the
-channel feed only to `release-data`. GitHub Pages deploys that exact payload,
-then a final job byte-compares the live HTTPS `latest.json` with it.
+downloads every asset over HTTPS and compares the bytes. A fresh `contents:
+read` runner then binds the feed candidate to that immutable public Release
+before committing the channel feed only to `release-data`. GitHub Pages
+deploys that exact payload, then a final job byte-compares the live HTTPS
+`latest.json` with it.
 
 The updater private key is never available to source installs, tests, builds,
 or Apple signing. The updater runner checks out only this public repository and
 receives only the already Apple-signed app. Apple credentials, the updater key,
-and `contents: write` exist on three different fresh runners.
+`contents: write`, and the feed deploy key exist on four different fresh
+runners. The GitHub Release publication runner cannot read the feed deploy key,
+and the feed runner has only `contents: read` through its GitHub token.
 
 Release builds pin Node `22.23.2` exactly. That same version is embedded as the
 private ZTC runtime inside `Colony.app`, smoke-tested after packaging, and
@@ -72,8 +76,9 @@ Before the first release:
    - `COLONY_APPLE_API_KEY_ID`;
    - `COLONY_APPLE_API_PRIVATE_KEY` (complete `.p8` contents).
 8. Put only `COLONY_FEED_DEPLOY_KEY`, a write-enabled deploy key for this
-   repository, in `colony-feed`. The publication job uses it only to fetch and
-   push `release-data`; application builds and signing jobs cannot access it.
+   repository, in `colony-feed`. The isolated feed-promotion job uses it only
+   to fetch and push `release-data`; application builds, signing jobs, and the
+   GitHub Release publication job cannot access it.
 9. Protect `colony-desktop-v*` and `colony-desktop-preview-v*` tags: allow
    creation only by the designated human release authority, disallow update and
    deletion, and do not grant Actions or deploy-key bypass. The release workflow
@@ -126,9 +131,10 @@ equal-precedence aliases, and same-version mutation fail closed. Every accepted
 manifest remains available at `<channel>/releases/<version>.json` as immutable
 per-version history.
 
-Run the local boundary tests with `npm test` and targeted mutation evidence with
-`npm run test:mutation`. Request files must be regular files, may be added only
-once, and must remain byte-identical to their addition commit. The workflow creates a draft,
+Run the local boundary tests with `npm test`, require the complete development
+tree to pass `npm audit --audit-level=moderate`, and collect targeted mutation
+evidence with `npm run test:mutation`. Request files must be regular files, may
+be added only once, and must remain byte-identical to their addition commit. The workflow creates a draft,
 resumes only an exactly matching draft, uploads only missing assets (including
 `latest.json` as the immutable feed-recovery copy), compares
 every asset byte-for-byte, and publishes only after the set is complete. App
