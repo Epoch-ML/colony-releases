@@ -75,7 +75,7 @@ test("public releases build an exact verified source revision on universal macOS
       "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
       "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
-      "actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa",
+      "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
       "actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b",
       "actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
       "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
@@ -245,6 +245,20 @@ test("immutable assets are verified over HTTPS before the Pages manifest moves",
   assert.ok(manifestIndex > compareIndex);
 });
 
+test("Pages uses a deterministic artifact uploaded through an immutable direct action", () => {
+  const feed = job("feed", "deploy");
+
+  assert.doesNotMatch(feed, /actions\/upload-pages-artifact/);
+  assert.match(
+    feed,
+    /Build deterministic Pages artifact(?:.|\n)*?tar \\\n\s+--format=ustar \\\n\s+--sort=name \\\n\s+--mtime='UTC 1970-01-01' \\\n\s+--owner=0 \\\n\s+--group=0 \\\n\s+--numeric-owner/,
+  );
+  assert.match(
+    feed,
+    /uses: actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02(?:.|\n)*?name: github-pages(?:.|\n)*?path: \$\{\{ runner\.temp \}\}\/artifact\.tar(?:.|\n)*?retention-days: 1/,
+  );
+});
+
 test("post-release retries verify and resume an exact immutable release", () => {
   const publish = job("publish", "feed");
   assert.doesNotMatch(workflow, /already exists; publish a higher version/);
@@ -369,7 +383,7 @@ test("GitHub host-key metadata requests use a step-scoped built-in token", () =>
   );
   const feedPromotion = feed.slice(
     feed.indexOf("      - id: feed"),
-    feed.indexOf("      - uses: actions/upload-pages-artifact"),
+    feed.length,
   );
 
   assert.doesNotMatch(sourceBuild.slice(0, sourceBuild.indexOf("    steps:")), /GITHUB_META_TOKEN/);
@@ -398,7 +412,7 @@ test("SSH host-key verification suppresses and ignores scanner banners", () => {
   );
   const feedPromotion = feed.slice(
     feed.indexOf("      - id: feed"),
-    feed.indexOf("      - uses: actions/upload-pages-artifact"),
+    feed.length,
   );
 
   for (const metadataStep of [sourceCheckout, feedPromotion]) {
@@ -572,7 +586,7 @@ test("request branches stay unprivileged and live feeds publish outside protecte
   assert.match(verifyLive, /latest\.json/);
   assert.match(verifyLive, /cmp /);
 
-  const pagesUpload = workflow.indexOf("actions/upload-pages-artifact@");
+  const pagesUpload = workflow.indexOf("name: Upload deterministic Pages artifact");
   const pagesDeploy = workflow.indexOf("actions/deploy-pages@");
   const liveVerification = workflow.indexOf("verify_live:");
   assert.ok(pagesUpload >= 0 && pagesDeploy > pagesUpload && liveVerification > pagesDeploy);
