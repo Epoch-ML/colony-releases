@@ -1394,6 +1394,7 @@ jobs:
     needs: feed
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 35
     permissions:
       pages: write
       id-token: write
@@ -1408,6 +1409,8 @@ jobs:
       - id: deployment
         name: Deploy channel feeds
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        with:
+          timeout: 1800000
 
   verify_live:
     name: Verify the deployed updater feed over HTTPS
