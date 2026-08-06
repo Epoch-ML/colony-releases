@@ -72,6 +72,7 @@ test("public releases build an exact verified source revision on universal macOS
       "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
       "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
+      "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
       "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
       "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
@@ -259,6 +260,18 @@ test("Pages uses a deterministic artifact uploaded through an immutable direct a
   );
 });
 
+test("Pages deployment tolerates a bounded queue longer than the action default", () => {
+  const deploy = job("deploy", "verify_live");
+
+  assert.match(deploy, /timeout-minutes: 35/);
+  assert.match(
+    deploy,
+    /actions\/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e(?:.|\n)*?with:\n\s+timeout: 1800000/,
+    "the deployment may wait 30 minutes, while the job remains bounded at 35 minutes",
+  );
+  assert.doesNotMatch(deploy, /timeout: 600000/);
+});
+
 test("post-release retries verify and resume an exact immutable release", () => {
   const publish = job("publish", "feed");
   assert.doesNotMatch(workflow, /already exists; publish a higher version/);
@@ -301,6 +314,48 @@ test("post-release retries verify and resume an exact immutable release", () => 
   assert.ok(authenticatedCompareIndex > uploadIndex);
   assert.ok(publishIndex > authenticatedCompareIndex);
   assert.ok(manifestIndex > compareIndex);
+});
+
+test("immutable release retries promote only canonical verified public bytes", () => {
+  const updaterSign = job("updater_sign", "publish");
+  const publish = job("publish", "feed");
+  const feed = job("feed", "deploy");
+  const verifyLive = job("verify_live");
+
+  assert.match(updaterSign, /name: colony-release-payload/);
+  assert.match(
+    publish,
+    /Existing immutable release will be verified from its public bytes/,
+    "an immutable retry must not require regenerated binary equality",
+  );
+  assert.match(
+    publish,
+    /if \[\[ "\$release_is_draft" != "true" \]\]; then(?:.|\n)*?"\$release_is_immutable" == "true"(?:.|\n)*?diff -u "\$expected_asset_names" "\$existing_asset_names"(?:.|\n)*?Existing immutable release will be verified from its public bytes/,
+  );
+  assert.match(publish, /\.browser_download_url/);
+  assert.match(publish, /\.digest/);
+  assert.match(publish, /--proto '=https' --proto-redir '=https' --tlsv1\.2/);
+  assert.match(publish, /--max-filesize/);
+  assert.match(publish, /shasum -a 256 -c checksums\.txt/);
+  assert.match(publish, /minisign[^\n]*\\\n(?:.|\n)*?-Vm "\$archive"/);
+  assert.match(
+    publish,
+    /if \[\[ "\$RELEASE_WAS_DRAFT" == "true" \]\]; then\n\s+cmp "\$asset" "\$CANONICAL_DIR\/\$name"\n\s+fi/,
+    "only a newly published draft may be compared with regenerated local bytes",
+  );
+  assert.match(
+    publish,
+    /Upload canonical verified release payload(?:.|\n)*?name: colony-verified-release-payload/,
+  );
+  assert.match(feed, /name: colony-verified-release-payload/);
+  assert.match(verifyLive, /name: colony-verified-release-payload/);
+  assert.doesNotMatch(feed, /name: colony-release-payload/);
+  assert.doesNotMatch(verifyLive, /name: colony-release-payload/);
+  assert.equal(
+    workflow.match(/name: colony-verified-release-payload/g)?.length,
+    3,
+    "publish uploads one canonical payload consumed by feed and live verification",
+  );
 });
 
 test("private release credentials are isolated from source build and test phases", () => {
@@ -518,8 +573,8 @@ test("untrusted source output crosses only digest-checked fresh-runner artifacts
   );
   assert.equal(
     workflow.match(/node scripts\/app-archive-policy\.mjs "\$(?:archive|transport)"/g)?.length,
-    3,
-    "both transports and the updater archive must pass member-type and expansion bounds",
+    4,
+    "both transports, the updater archive, and canonical public archive must pass bounds",
   );
   assert.equal(
     workflow.match(/COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata --no-acls -h -czf/g)?.length,

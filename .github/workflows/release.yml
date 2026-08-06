@@ -774,6 +774,7 @@ jobs:
       COLONY_CHANNEL: ${{ needs.validate.outputs.channel }}
       COLONY_RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
       COLONY_REQUEST_COMMIT: ${{ needs.validate.outputs.request_commit }}
+      COLONY_REQUESTED_AT: ${{ needs.validate.outputs.requested_at }}
       COLONY_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
       COLONY_VERSION: ${{ needs.validate.outputs.version }}
     steps:
@@ -844,7 +845,8 @@ jobs:
               and .platforms["darwin-x86_64"].signature == $signature' \
             "$RELEASE_DIR/latest.json"
 
-      - name: Create or resume the exact immutable GitHub Release
+      - id: release
+        name: Create or resume the exact immutable GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_DIR: ${{ runner.temp }}/colony-release
@@ -909,7 +911,7 @@ jobs:
                 and .name == $title
                 and .body == $body
                 and .prerelease == $prerelease
-                and .draft != null' \
+                and (.draft | type == "boolean")' \
               "$release_json"
           }
           fetch_release
@@ -927,21 +929,40 @@ jobs:
           done <"$existing_asset_names"
 
           release_is_draft="$(jq -r '.draft' "$release_json")"
+          release_is_immutable="$(jq -r '.immutable // false' "$release_json")"
+          if [[ "$release_is_draft" != "true" ]]; then
+            [[ "$release_is_immutable" == "true" ]] || {
+              echo "::error::an existing published release must be immutable"
+              exit 1
+            }
+            diff -u "$expected_asset_names" "$existing_asset_names"
+            echo 'Existing immutable release will be verified from its public bytes.'
+            echo "was_draft=false" >>"$GITHUB_OUTPUT"
+            verify_release_tag_target
+            exit 0
+          fi
+          [[ "$release_is_immutable" != "true" ]] || {
+            echo "::error::a draft release cannot already be immutable"
+            exit 1
+          }
+
           authenticated_assets="$RUNNER_TEMP/colony-authenticated-assets"
           mkdir -p "$authenticated_assets"
           for asset in "${assets[@]}"; do
             name="$(basename "$asset")"
-            asset_id="$(jq -r --arg name "$name" \
-              '.assets[] | select(.name == $name) | .id' "$release_json")"
-            if [[ -n "$asset_id" ]]; then
+            asset_count="$(jq --arg name "$name" \
+              '[.assets[] | select(.name == $name)] | length' "$release_json")"
+            if [[ "$asset_count" -eq 1 ]]; then
+              asset_id="$(jq -er --arg name "$name" \
+                '.assets[] | select(.name == $name) | .id' "$release_json")"
               gh api --header 'Accept: application/octet-stream' \
                 "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
                 >"$authenticated_assets/$name"
               cmp "$asset" "$authenticated_assets/$name"
-            elif [[ "$release_is_draft" == "true" ]]; then
+            elif [[ "$asset_count" -eq 0 ]]; then
               gh release upload "$COLONY_RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY"
             else
-              echo "::error::published immutable release is missing $name"
+              echo "::error::draft contains duplicate asset names: $name"
               exit 1
             fi
           done
@@ -971,33 +992,235 @@ jobs:
             echo "::error::GitHub release immutability is not enabled"
             exit 1
           fi
+          echo "was_draft=true" >>"$GITHUB_OUTPUT"
 
-      - name: Re-download every release asset over HTTPS and compare bytes
+      - name: Re-download every release asset over HTTPS as canonical bytes
         env:
-          RELEASE_DIR: ${{ runner.temp }}/colony-release
+          CANONICAL_DIR: ${{ runner.temp }}/colony-verified-release
+          GENERATED_DIR: ${{ runner.temp }}/colony-release
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_WAS_DRAFT: ${{ steps.release.outputs.was_draft }}
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
-          verified_dir="$(mktemp -d "$RUNNER_TEMP/colony-https-assets.XXXXXX")"
-          encoded_tag="$(jq -rn --arg value "$COLONY_RELEASE_TAG" '$value|@uri')"
-          assets=(
-            "$RELEASE_DIR/"*.dmg
-            "$RELEASE_DIR/"*.app.tar.gz
-            "$RELEASE_DIR/"*.app.tar.gz.sig
-            "$RELEASE_DIR/checksums.txt"
-            "$RELEASE_DIR/latest.json"
-            "$RELEASE_DIR/release-metadata.json"
+          [[ ! -e "$CANONICAL_DIR" ]] || {
+            echo "::error::canonical release directory already exists"
+            exit 1
+          }
+          mkdir "$CANONICAL_DIR"
+          release_json="$RUNNER_TEMP/colony-release.json"
+          release_id="$(gh release view "$COLONY_RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" --json databaseId --jq '.databaseId')"
+          gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/$GITHUB_REPOSITORY/releases/$release_id" >"$release_json"
+          expected_prerelease=false
+          if [[ "$COLONY_CHANNEL" == "preview" ]]; then
+            expected_prerelease=true
+          fi
+          jq -e \
+            --arg tag "$COLONY_RELEASE_TAG" \
+            --arg title "Colony $COLONY_VERSION" \
+            --arg body "Verified Colony $COLONY_CHANNEL release from Epoch-ML/zerg@$COLONY_SOURCE_SHA." \
+            --argjson prerelease "$expected_prerelease" \
+            '.tag_name == $tag
+              and .name == $title
+              and .body == $body
+              and .prerelease == $prerelease
+              and .draft == false
+              and .immutable == true
+              and (.assets | length) == 6' \
+            "$release_json"
+
+          generated_assets=(
+            "$GENERATED_DIR/"*.dmg
+            "$GENERATED_DIR/"*.app.tar.gz
+            "$GENERATED_DIR/"*.app.tar.gz.sig
+            "$GENERATED_DIR/checksums.txt"
+            "$GENERATED_DIR/latest.json"
+            "$GENERATED_DIR/release-metadata.json"
           )
-          for asset in "${assets[@]}"; do
+          [[ "${#generated_assets[@]}" -eq 6 ]] || {
+            echo "::error::regenerated payload must name exactly six canonical assets"
+            exit 1
+          }
+          expected_names="$RUNNER_TEMP/colony-canonical-expected-assets.txt"
+          actual_names="$RUNNER_TEMP/colony-canonical-actual-assets.txt"
+          for asset in "${generated_assets[@]}"; do
+            [[ -f "$asset" && ! -L "$asset" ]] || {
+              echo "::error::regenerated payload contains a non-regular asset"
+              exit 1
+            }
+            basename "$asset"
+          done | LC_ALL=C sort >"$expected_names"
+          jq -r '.assets[].name' "$release_json" | LC_ALL=C sort >"$actual_names"
+          diff -u "$expected_names" "$actual_names"
+
+          encoded_tag="$(jq -rn --arg value "$COLONY_RELEASE_TAG" '$value|@uri')"
+          max_binary_bytes=$((512 * 1024 * 1024))
+          max_json_bytes=$((1024 * 1024))
+          max_text_bytes=$((64 * 1024))
+          max_total_bytes=$((1024 * 1024 * 1024))
+          total_asset_bytes=0
+          for asset in "${generated_assets[@]}"; do
             name="$(basename "$asset")"
+            asset_count="$(jq --arg name "$name" \
+              '[.assets[] | select(.name == $name)] | length' "$release_json")"
+            [[ "$asset_count" -eq 1 ]] || {
+              echo "::error::immutable release asset set is not exact: $name"
+              exit 1
+            }
+            url="$(jq -er --arg name "$name" \
+              '.assets[] | select(.name == $name) | .browser_download_url' \
+              "$release_json")"
+            api_size="$(jq -er --arg name "$name" \
+              '.assets[] | select(.name == $name) |
+                .size | select(type == "number" and . > 0 and floor == .) | tostring' \
+              "$release_json")"
+            api_digest="$(jq -er --arg name "$name" \
+              '.assets[] | select(.name == $name) |
+                .digest | select(type == "string" and test("^sha256:[0-9a-f]{64}$"))' \
+              "$release_json")"
+            case "$name" in
+              *.dmg|*.app.tar.gz)
+                maximum_bytes="$max_binary_bytes"
+                ;;
+              *.app.tar.gz.sig|checksums.txt)
+                maximum_bytes="$max_text_bytes"
+                ;;
+              latest.json|release-metadata.json)
+                maximum_bytes="$max_json_bytes"
+                ;;
+              *)
+                echo "::error::unexpected canonical asset name: $name"
+                exit 1
+                ;;
+            esac
+            [[ "$api_size" -le "$maximum_bytes" ]] || {
+              echo "::error::$name exceeds its verification size bound"
+              exit 1
+            }
+            total_asset_bytes=$((total_asset_bytes + api_size))
+            [[ "$total_asset_bytes" -lt "$max_total_bytes" ]] || {
+              echo "::error::canonical asset set reaches its total size bound"
+              exit 1
+            }
             encoded_name="$(jq -rn --arg value "$name" '$value|@uri')"
-            url="https://github.com/$GITHUB_REPOSITORY/releases/download/$encoded_tag/$encoded_name"
+            expected_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$encoded_tag/$encoded_name"
+            [[ "$url" == "$expected_url" ]] || {
+              echo "::error::release asset URL escaped its repository, tag, or name"
+              exit 1
+            }
             curl --fail --show-error --location \
               --retry 8 --retry-all-errors --retry-delay 2 \
-              --output "$verified_dir/$name" "$url"
-            cmp "$asset" "$verified_dir/$name"
+              --proto '=https' --proto-redir '=https' --tlsv1.2 \
+              --max-filesize "$maximum_bytes" \
+              --output "$CANONICAL_DIR/$name" "$url"
+            downloaded_size="$(stat --format='%s' "$CANONICAL_DIR/$name")"
+            [[ "$downloaded_size" == "$api_size" ]] || {
+              echo "::error::$name size differs from the immutable Release API"
+              exit 1
+            }
+            downloaded_digest="$(shasum -a 256 "$CANONICAL_DIR/$name" | cut -d ' ' -f 1)"
+            [[ "sha256:$downloaded_digest" == "$api_digest" ]] || {
+              echo "::error::$name digest differs from the immutable Release API"
+              exit 1
+            }
+            if [[ "$RELEASE_WAS_DRAFT" == "true" ]]; then
+              cmp "$asset" "$CANONICAL_DIR/$name"
+            fi
           done
+
+          (
+            cd "$CANONICAL_DIR"
+            shasum -a 256 -c checksums.txt
+          )
+          archives=("$CANONICAL_DIR/"*.app.tar.gz)
+          [[ "${#archives[@]}" -eq 1 ]]
+          archive="${archives[0]}"
+          decoded_key="$RUNNER_TEMP/colony-canonical-updater.pub"
+          decoded_signature="$RUNNER_TEMP/colony-canonical-updater.minisig"
+          updater_key_file="updater.${COLONY_CHANNEL}.pubkey"
+          base64 --decode "$updater_key_file" >"$decoded_key"
+          base64 --decode "$archive.sig" >"$decoded_signature"
+          "$RUNNER_TEMP/minisign-linux/x86_64/minisign" \
+            -Vm "$archive" -x "$decoded_signature" -p "$decoded_key"
+          node scripts/app-archive-policy.mjs "$archive"
+
+          archive_name="$(basename "$archive")"
+          encoded_archive="$(jq -rn --arg value "$archive_name" '$value|@uri')"
+          expected_archive_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$encoded_tag/$encoded_archive"
+          expected_signature="$(tr -d '\r\n' <"$archive.sig")"
+          jq -e \
+            --arg version "$COLONY_VERSION" \
+            --arg notes "Colony $COLONY_VERSION ($COLONY_CHANNEL)" \
+            --arg pub_date "$COLONY_REQUESTED_AT" \
+            --arg url "$expected_archive_url" \
+            --arg signature "$expected_signature" \
+            '.version == $version
+              and .notes == $notes
+              and .pub_date == $pub_date
+              and (.platforms | keys | sort) == ["darwin-aarch64", "darwin-x86_64"]
+              and .platforms["darwin-aarch64"] == {url: $url, signature: $signature}
+              and .platforms["darwin-x86_64"] == {url: $url, signature: $signature}' \
+            "$CANONICAL_DIR/latest.json"
+
+          expected_notarized=false
+          if [[ "$COLONY_CHANNEL" == "stable" ]]; then
+            expected_notarized=true
+          fi
+          jq -e \
+            --arg version "$COLONY_VERSION" \
+            --arg channel "$COLONY_CHANNEL" \
+            --arg source_sha "$COLONY_SOURCE_SHA" \
+            --argjson notarized "$expected_notarized" \
+            '.schema_version == 1
+              and .product == "Colony"
+              and .version == $version
+              and .channel == $channel
+              and .platform == "darwin-universal"
+              and .source_sha == $source_sha
+              and .runtime_node_version == "v22.23.2"
+              and .apple_notarized == $notarized
+              and (.artifacts | length) == 3' \
+            "$CANONICAL_DIR/release-metadata.json"
+          for artifact in "$CANONICAL_DIR/"*.dmg \
+            "$CANONICAL_DIR/"*.app.tar.gz \
+            "$CANONICAL_DIR/"*.app.tar.gz.sig; do
+            name="$(basename "$artifact")"
+            digest="$(shasum -a 256 "$artifact" | cut -d ' ' -f 1)"
+            jq -e --arg name "$name" --arg digest "$digest" \
+              '([.artifacts[] | select(.name == $name and .sha256 == $digest)] | length) == 1' \
+              "$CANONICAL_DIR/release-metadata.json"
+          done
+          (
+            cd "$CANONICAL_DIR"
+            shasum -a 256 \
+              ./*.dmg \
+              ./*.app.tar.gz \
+              ./*.app.tar.gz.sig \
+              checksums.txt \
+              latest.json \
+              release-metadata.json \
+              >TRANSPORT-SHA256SUMS
+          )
+          git fetch --force --no-tags origin "refs/tags/$COLONY_RELEASE_TAG"
+          release_tag_commit="$(git rev-parse 'FETCH_HEAD^{commit}')"
+          [[ "$release_tag_commit" == "$COLONY_REQUEST_COMMIT" ]] || {
+            echo "::error::release tag moved during canonical asset verification"
+            exit 1
+          }
+
+      - name: Upload canonical verified release payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: colony-verified-release-payload
+          path: ${{ runner.temp }}/colony-verified-release
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
 
   feed:
     name: Promote the verified feed without GitHub Release write authority
@@ -1026,10 +1249,10 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           npm test
 
-      - name: Download the updater-signed publication payload
+      - name: Download the canonical verified release payload
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          name: colony-release-payload
+          name: colony-verified-release-payload
           path: ${{ runner.temp }}/colony-release
 
       - name: Bind the feed candidate to the immutable public release
@@ -1171,6 +1394,7 @@ jobs:
     needs: feed
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 35
     permissions:
       pages: write
       id-token: write
@@ -1185,6 +1409,8 @@ jobs:
       - id: deployment
         name: Deploy channel feeds
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        with:
+          timeout: 1800000
 
   verify_live:
     name: Verify the deployed updater feed over HTTPS
@@ -1195,10 +1421,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Download the exact updater-signed payload
+      - name: Download the canonical verified release payload
         uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
-          name: colony-release-payload
+          name: colony-verified-release-payload
           path: ${{ runner.temp }}/colony-release
 
       - name: Compare the live Pages feed with the signed publication payload
