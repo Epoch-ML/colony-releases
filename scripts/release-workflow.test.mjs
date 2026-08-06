@@ -394,6 +394,34 @@ test("targeted ZTC TypeScript tests resolve the locked loader from the ZTC works
   );
 });
 
+test("pane-launch tests build the exact locked Rust TUI prerequisite", () => {
+  const sourceBuild = job("source_build", "apple_sign");
+  const testStep = sourceBuild.slice(
+    sourceBuild.indexOf("      - name: Test ZTC public runtime and Colony"),
+    sourceBuild.indexOf("      - name: Generate updater-enabled release config"),
+  );
+  const rustBuild =
+    'cargo build --release --locked --manifest-path "$ztc_tui_manifest"';
+  const paneTests = 'node --import tsx --test \\';
+
+  assert.match(
+    testStep,
+    /ztc_tui_lock="locks\/ztc-tui\/\$\{COLONY_SOURCE_SHA\}\.Cargo\.lock"(?:.|\n)*?ztc_tui_manifest="\$SOURCE_DIR\/ztc\/packages\/ztc-tui\/Cargo\.toml"(?:.|\n)*?install -m 0600 "\$ztc_tui_lock" "\$\(dirname "\$ztc_tui_manifest"\)\/Cargo\.lock"/,
+    "the exact source SHA must select the trusted ztc-tui dependency lock",
+  );
+  assert.ok(testStep.includes(rustBuild), "ztc-tui must use a locked release build");
+  assert.match(
+    testStep,
+    /ztc_tui_binary="\$SOURCE_DIR\/ztc\/packages\/ztc-tui\/target\/release\/ztc-tui"(?:.|\n)*?\[\[ -x "\$ztc_tui_binary" \]\]/,
+    "the binary path used by ZTC discovery must exist and be executable",
+  );
+  assert.ok(
+    testStep.indexOf(rustBuild) < testStep.indexOf(paneTests),
+    "the native renderer must be built before pane-launch tests execute",
+  );
+  assert.doesNotMatch(testStep, /cargo build --release(?! --locked)/);
+});
+
 test("untrusted source output crosses only digest-checked fresh-runner artifacts", () => {
   const sourceBuild = job("source_build", "apple_sign");
   assert.match(job("apple_sign", "updater_sign"), /needs:\s*\[validate, source_build\]/);

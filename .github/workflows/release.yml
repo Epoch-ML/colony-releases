@@ -278,6 +278,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          ztc_tui_lock="locks/ztc-tui/${COLONY_SOURCE_SHA}.Cargo.lock"
+          ztc_tui_manifest="$SOURCE_DIR/ztc/packages/ztc-tui/Cargo.toml"
+          ztc_tui_binary="$SOURCE_DIR/ztc/packages/ztc-tui/target/release/ztc-tui"
+          [[ -f "$ztc_tui_lock" && ! -L "$ztc_tui_lock" ]] || {
+            echo "::error::no trusted ztc-tui lock for source $COLONY_SOURCE_SHA"
+            exit 1
+          }
+          install -m 0600 "$ztc_tui_lock" "$(dirname "$ztc_tui_manifest")/Cargo.lock"
+          cargo build --release --locked --manifest-path "$ztc_tui_manifest"
+          [[ -x "$ztc_tui_binary" ]] || {
+            echo "::error::locked ztc-tui build did not produce $ztc_tui_binary"
+            exit 1
+          }
           npm --prefix "$SOURCE_DIR/ztc" run build
           (
             cd "$SOURCE_DIR/ztc"
