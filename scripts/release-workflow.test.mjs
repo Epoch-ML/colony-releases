@@ -132,6 +132,29 @@ test("public releases build an exact verified source revision on universal macOS
   assert.doesNotMatch(workflow, /git log -n 1 --format=%H --/);
 });
 
+test("the pinned minimal Rust toolchain installs formatter and linter components", () => {
+  const sourceBuild = job("source_build", "apple_sign");
+  const installStep = sourceBuild.slice(
+    sourceBuild.indexOf("      - name: Install pinned build toolchains"),
+    sourceBuild.indexOf("      - name: Reject shipped production dependency advisories"),
+  );
+  const componentInstall =
+    "rustup component add --toolchain 1.88.0 rustfmt clippy";
+
+  assert.match(
+    installStep,
+    /rustup toolchain install 1\.88\.0 --profile minimal --no-self-update\n\s+rustup component add --toolchain 1\.88\.0 rustfmt clippy\n\s+rustup target add --toolchain 1\.88\.0 \\\n\s+aarch64-apple-darwin x86_64-apple-darwin/,
+    "the minimal profile must add both required components on the same pinned toolchain",
+  );
+  assert.equal(workflow.match(/rustup component add/g)?.length, 1);
+  for (const cargoValidation of ["cargo test --locked", "cargo clippy --locked"]) {
+    assert.ok(
+      sourceBuild.indexOf(componentInstall) < sourceBuild.indexOf(cargoValidation),
+      `pinned Rust components must be installed before ${cargoValidation}`,
+    );
+  }
+});
+
 test("preview and stable signing policies are explicit and stable fails closed", () => {
   assert.match(workflow, /COLONY_TAURI_SIGNING_PRIVATE_KEY/);
   assert.match(workflow, /COLONY_TAURI_SIGNING_PRIVATE_KEY_PASSWORD/);

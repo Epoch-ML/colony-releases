@@ -244,6 +244,7 @@ jobs:
         run: |
           set -euo pipefail
           rustup toolchain install 1.88.0 --profile minimal --no-self-update
+          rustup component add --toolchain 1.88.0 rustfmt clippy
           rustup target add --toolchain 1.88.0 \
             aarch64-apple-darwin x86_64-apple-darwin
           rustup default 1.88.0
