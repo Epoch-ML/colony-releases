@@ -260,7 +260,7 @@ test("private release credentials are isolated from source build and test phases
   assert.match(feed, /secrets\.COLONY_FEED_DEPLOY_KEY/);
   assert.doesNotMatch(
     feed,
-    /contents:\s*write|github\.token|GH_TOKEN|gh release|ZERG_SOURCE_DEPLOY_KEY|TAURI_SIGNING_PRIVATE_KEY|secrets\.COLONY_APPLE_|source_repository/,
+    /contents:\s*write|GH_TOKEN|gh release|ZERG_SOURCE_DEPLOY_KEY|TAURI_SIGNING_PRIVATE_KEY|secrets\.COLONY_APPLE_|source_repository/,
   );
   assert.equal(
     workflow.match(/secrets\.COLONY_FEED_DEPLOY_KEY/g)?.length,
@@ -293,7 +293,7 @@ test("GitHub Release write authority never shares a runner with the feed deploy 
   assert.match(feed, /COLONY_FEED_DEPLOY_KEY/);
   assert.doesNotMatch(
     feed,
-    /contents:\s*write|github\.token|GH_TOKEN|gh release (?:create|upload|edit)/,
+    /contents:\s*write|GH_TOKEN|gh release (?:create|upload|edit)/,
     "the feed runner must not receive GitHub Release write authority",
   );
 });

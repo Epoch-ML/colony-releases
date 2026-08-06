@@ -169,6 +169,7 @@ jobs:
       - id: source
         name: Check out only the exact source SHA and matching tag
         env:
+          GITHUB_META_TOKEN: ${{ github.token }}
           SOURCE_DEPLOY_KEY: ${{ secrets.ZERG_SOURCE_DEPLOY_KEY }}
         shell: bash
         run: |
@@ -187,6 +188,7 @@ jobs:
           chmod 600 "$key_path"
           curl --fail --show-error --silent --location \
             --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GITHUB_META_TOKEN" \
             https://api.github.com/meta \
             | jq -r '.ssh_keys[]' >"$meta_keys"
           ssh-keyscan -t rsa,ecdsa,ed25519 github.com 2>/dev/null >"$scanned_keys"
@@ -1000,6 +1002,7 @@ jobs:
         name: Persist the verified update manifest on release-data
         env:
           FEED_DEPLOY_KEY: ${{ secrets.COLONY_FEED_DEPLOY_KEY }}
+          GITHUB_META_TOKEN: ${{ github.token }}
           RELEASE_DIR: ${{ runner.temp }}/colony-release
         shell: bash
         run: |
@@ -1017,6 +1020,7 @@ jobs:
           chmod 600 "$key_path"
           curl --fail --show-error --silent --location \
             --header 'Accept: application/vnd.github+json' \
+            --header "Authorization: Bearer $GITHUB_META_TOKEN" \
             https://api.github.com/meta \
             | jq -r '.ssh_keys[]' >"$meta_keys"
           ssh-keyscan -t rsa,ecdsa,ed25519 github.com 2>/dev/null >"$scanned_keys"
