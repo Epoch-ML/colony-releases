@@ -303,6 +303,39 @@ test("post-release retries verify and resume an exact immutable release", () => 
   assert.ok(manifestIndex > compareIndex);
 });
 
+test("immutable release retries promote only canonical verified public bytes", () => {
+  const updaterSign = job("updater_sign", "publish");
+  const publish = job("publish", "feed");
+  const feed = job("feed", "deploy");
+  const verifyLive = job("verify_live");
+
+  assert.match(updaterSign, /name: colony-release-payload/);
+  assert.match(
+    publish,
+    /Existing immutable release will be verified from its public bytes/,
+    "an immutable retry must not require regenerated binary equality",
+  );
+  assert.match(publish, /\.browser_download_url/);
+  assert.match(publish, /\.digest/);
+  assert.match(publish, /--proto '=https' --proto-redir '=https' --tlsv1\.2/);
+  assert.match(publish, /--max-filesize/);
+  assert.match(publish, /shasum -a 256 -c checksums\.txt/);
+  assert.match(publish, /minisign[^\n]*\\\n(?:.|\n)*?-Vm "\$archive"/);
+  assert.match(
+    publish,
+    /Upload canonical verified release payload(?:.|\n)*?name: colony-verified-release-payload/,
+  );
+  assert.match(feed, /name: colony-verified-release-payload/);
+  assert.match(verifyLive, /name: colony-verified-release-payload/);
+  assert.doesNotMatch(feed, /name: colony-release-payload/);
+  assert.doesNotMatch(verifyLive, /name: colony-release-payload/);
+  assert.equal(
+    workflow.match(/name: colony-verified-release-payload/g)?.length,
+    3,
+    "publish uploads one canonical payload consumed by feed and live verification",
+  );
+});
+
 test("private release credentials are isolated from source build and test phases", () => {
   const sourceBuild = job("source_build", "apple_sign");
   const appleSign = job("apple_sign", "updater_sign");
