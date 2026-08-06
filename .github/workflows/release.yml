@@ -1,0 +1,1081 @@
+name: Build and publish Colony desktop
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_file:
+        description: Existing requests/<release-tag>.json to rebuild
+        type: string
+        required: true
+
+concurrency:
+  group: colony-desktop-publication
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate immutable release request
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      channel: ${{ steps.request.outputs.channel }}
+      release_tag: ${{ steps.request.outputs.release_tag }}
+      requested_at: ${{ steps.request.outputs.requested_at }}
+      request_commit: ${{ steps.select.outputs.request_commit }}
+      request_path: ${{ steps.select.outputs.request_path }}
+      source_ref: ${{ steps.request.outputs.source_ref }}
+      source_repository: ${{ steps.request.outputs.source_repository }}
+      source_sha: ${{ steps.request.outputs.source_sha }}
+      version: ${{ steps.request.outputs.version }}
+    steps:
+      - name: Require the protected default branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::release workflows may run only from protected main"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: select
+        name: Select one immutable request addition
+        env:
+          DISPATCH_REQUEST: ${{ inputs.request_file }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          request_path="$DISPATCH_REQUEST"
+          if [[ ! "$request_path" =~ ^requests/[0-9A-Za-z._+-]+\.json$ ]]; then
+            echo "::error::request path must be requests/<release-tag>.json"
+            exit 1
+          fi
+          if [[ -L "$request_path" ]]; then
+            echo "::error::release requests must not be symbolic links"
+            exit 1
+          fi
+          if [[ ! -f "$request_path" ]]; then
+            echo "::error::request file does not exist: $request_path"
+            exit 1
+          fi
+          mapfile -t additions < <(git log --diff-filter=A --format=%H -- "$request_path")
+          if [[ "${#additions[@]}" -ne 1 || ! "${additions[0]}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::request path must have exactly one immutable addition commit"
+            exit 1
+          fi
+          request_commit="${additions[0]}"
+          git merge-base --is-ancestor "$request_commit" "$GITHUB_SHA"
+          read -r -a commit_and_parents <<<"$(git rev-list --parents -n 1 "$request_commit")"
+          if [[ ${#commit_and_parents[@]} -ne 2 ]]; then
+            echo "::error::the request addition must be a single-parent commit"
+            exit 1
+          fi
+          mapfile -d '' -t addition_changes < <(
+            git diff --name-status --no-renames -z \
+              "${request_commit}^" "$request_commit"
+          )
+          if [[
+            ${#addition_changes[@]} -ne 2 ||
+            "${addition_changes[0]}" != "A" ||
+            "${addition_changes[1]}" != "$request_path"
+          ]]; then
+            echo "::error::the request addition commit must add only this request"
+            exit 1
+          fi
+          request_mode="$(git ls-tree "$request_commit" -- "$request_path" | cut -d ' ' -f 1)"
+          if [[ "$request_mode" != "100644" ]]; then
+            echo "::error::the immutable request must be a normal non-executable file"
+            exit 1
+          fi
+          committed_request="$RUNNER_TEMP/colony-request-at-addition.json"
+          git show "$request_commit:$request_path" >"$committed_request"
+          cmp "$request_path" "$committed_request"
+          echo "request_commit=$request_commit" >>"$GITHUB_OUTPUT"
+          echo "request_path=$request_path" >>"$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+
+      - name: Test the public release boundary
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+
+      - id: request
+        name: Validate request schema and provenance
+        env:
+          REQUEST_PATH: ${{ steps.select.outputs.request_path }}
+        run: node scripts/release-request.mjs "$REQUEST_PATH"
+
+      - name: Require a pre-existing protected public tag at the request commit
+        env:
+          RELEASE_TAG: ${{ steps.request.outputs.release_tag }}
+          REQUEST_COMMIT: ${{ steps.select.outputs.request_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git ls-remote --exit-code --refs origin \
+            "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::protected public tag $RELEASE_TAG must exist before dispatch"
+            exit 1
+          fi
+          git fetch --force --no-tags origin "refs/tags/$RELEASE_TAG"
+          release_tag_commit="$(git rev-parse 'FETCH_HEAD^{commit}')"
+          if [[ "$release_tag_commit" != "$REQUEST_COMMIT" ]]; then
+            echo "::error::release tag targets $release_tag_commit, expected $REQUEST_COMMIT"
+            exit 1
+          fi
+
+  source_build:
+    name: Build and smoke-test source without signing credentials
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 90
+    environment: colony-source
+    permissions:
+      contents: read
+    env:
+      COLONY_CHANNEL: ${{ needs.validate.outputs.channel }}
+      COLONY_RUNTIME_NODE_VERSION: v22.23.2
+      COLONY_SOURCE_REF: ${{ needs.validate.outputs.source_ref }}
+      COLONY_SOURCE_REPOSITORY: ${{ needs.validate.outputs.source_repository }}
+      COLONY_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      COLONY_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+
+      - name: Test the trusted public boundary before source checkout
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+
+      - id: source
+        name: Check out only the exact source SHA and matching tag
+        env:
+          SOURCE_DEPLOY_KEY: ${{ secrets.ZERG_SOURCE_DEPLOY_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$SOURCE_DEPLOY_KEY" ]]; then
+            echo "::error::ZERG_SOURCE_DEPLOY_KEY is not configured in colony-source"
+            exit 1
+          fi
+          source_dir="$(mktemp -d "$RUNNER_TEMP/colony-source.XXXXXX")"
+          key_path="$RUNNER_TEMP/colony-zerg-source-deploy-key"
+          known_hosts="$RUNNER_TEMP/colony-github-known-hosts"
+          meta_keys="$RUNNER_TEMP/colony-github-meta-keys"
+          scanned_keys="$RUNNER_TEMP/colony-github-scanned-keys"
+          trap 'rm -f "$key_path"' EXIT
+          printf '%s\n' "$SOURCE_DEPLOY_KEY" >"$key_path"
+          chmod 600 "$key_path"
+          curl --fail --show-error --silent --location \
+            --header 'Accept: application/vnd.github+json' \
+            https://api.github.com/meta \
+            | jq -r '.ssh_keys[]' >"$meta_keys"
+          ssh-keyscan -t rsa,ecdsa,ed25519 github.com 2>/dev/null >"$scanned_keys"
+          : >"$known_hosts"
+          while read -r _host algorithm key; do
+            grep -Fqx "$algorithm $key" "$meta_keys" || {
+              echo "::error::ssh-keyscan returned a key absent from GitHub authenticated metadata"
+              exit 1
+            }
+            printf 'github.com %s %s\n' "$algorithm" "$key" >>"$known_hosts"
+          done <"$scanned_keys"
+          [[ -s "$known_hosts" ]] || {
+            echo "::error::no verified GitHub SSH host keys were discovered"
+            exit 1
+          }
+          export GIT_SSH_COMMAND="ssh -i $key_path -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"
+          git init --ref-format=reftable "$source_dir"
+          git -C "$source_dir" remote add origin "git@github.com:${COLONY_SOURCE_REPOSITORY}.git"
+          git -C "$source_dir" fetch --no-tags --depth=1 origin "$COLONY_SOURCE_SHA"
+          git -C "$source_dir" fetch --no-tags --depth=1 origin \
+            "$COLONY_SOURCE_REF:$COLONY_SOURCE_REF"
+          tag_sha="$(git -C "$source_dir" rev-parse "$COLONY_SOURCE_REF^{commit}")"
+          [[ "$tag_sha" == "$COLONY_SOURCE_SHA" ]] || {
+            echo "::error::source tag resolves to $tag_sha, not $COLONY_SOURCE_SHA"
+            exit 1
+          }
+          git -C "$source_dir" checkout --detach "$COLONY_SOURCE_SHA"
+          [[ "$(git -C "$source_dir" rev-parse HEAD)" == "$COLONY_SOURCE_SHA" ]]
+          echo "source_dir=$source_dir" >>"$GITHUB_OUTPUT"
+
+      - name: Bind source to the public updater trust root
+        env:
+          SOURCE_DIR: ${{ steps.source.outputs.source_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          updater_key_file="updater.${COLONY_CHANNEL}.pubkey"
+          cmp "$updater_key_file" \
+            "$SOURCE_DIR/colony/src-tauri/$updater_key_file"
+
+      - name: Install pinned build toolchains and locked source dependencies
+        env:
+          SOURCE_DIR: ${{ steps.source.outputs.source_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.88.0 --profile minimal --no-self-update
+          rustup target add --toolchain 1.88.0 \
+            aarch64-apple-darwin x86_64-apple-darwin
+          rustup default 1.88.0
+          rustc --version | grep -F 'rustc 1.88.0'
+          npm ci --prefix "$SOURCE_DIR/ztc"
+          npm ci --prefix "$SOURCE_DIR/ztc-web-client"
+          npm ci --prefix "$SOURCE_DIR/colony"
+          bun_bin="$SOURCE_DIR/colony/node_modules/.bin/bun"
+          [[ "$("$bun_bin" --version)" == "1.2.20" ]] || {
+            echo "::error::locked Colony Bun does not match 1.2.20"
+            exit 1
+          }
+          echo "$SOURCE_DIR/colony/node_modules/.bin" >>"$GITHUB_PATH"
+
+      - name: Reject shipped production dependency advisories
+        env:
+          SOURCE_DIR: ${{ steps.source.outputs.source_dir }}
+        run: |
+          npm audit --omit=dev --audit-level=moderate --prefix "$SOURCE_DIR/ztc"
+          # rkyv is an inactive optional rust_decimal backend; even
+          # `cargo tree --target all -i rkyv` has no path from Colony.
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo audit --file "$SOURCE_DIR/colony/src-tauri/Cargo.lock" \
+            --ignore RUSTSEC-2026-0235
+          npm audit --omit=dev --audit-level=moderate --prefix "$SOURCE_DIR/ztc-web-client"
+          npm audit --omit=dev --audit-level=moderate --prefix "$SOURCE_DIR/colony"
+
+      - name: Test ZTC public runtime and Colony
+        env:
+          SOURCE_DIR: ${{ steps.source.outputs.source_dir }}
+          TAURI_CONFIG: '{"bundle":{"externalBin":[],"resources":[]}}'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix "$SOURCE_DIR/ztc" run build
+          node --import tsx --test \
+            "$SOURCE_DIR/ztc/tests/unit/pane_child_ztc_launch.test.ts" \
+            "$SOURCE_DIR/ztc/tests/unit/plugin_public_surface_static.test.ts" \
+            "$SOURCE_DIR/ztc/tests/unit/plugin_runtime_registry.test.ts"
+          npm --prefix "$SOURCE_DIR/ztc-web-client" run build:plugin
+          (
+            cd "$SOURCE_DIR/colony"
+            npx tsc --noEmit
+            npx tsc -p src/colony/ui/tsconfig.json --noEmit
+            npm test
+            npm run test:ui
+          )
+          cargo test --locked --manifest-path "$SOURCE_DIR/colony/src-tauri/Cargo.toml"
+          cargo clippy --locked --manifest-path "$SOURCE_DIR/colony/src-tauri/Cargo.toml" \
+            --all-targets -- -D warnings
+
+      - name: Generate updater-enabled release config and build an ad-hoc app
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+          COLONY_UPDATER_ENABLED: "true"
+          COLONY_UPDATE_BASE_URL: https://epoch-ml.github.io/colony-releases
+          COLONY_UPDATE_CHANNEL: ${{ needs.validate.outputs.channel }}
+          SOURCE_DIR: ${{ steps.source.outputs.source_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix "$SOURCE_DIR/colony" run release:config
+          cd "$SOURCE_DIR/colony"
+          "$GITHUB_WORKSPACE/node_modules/.bin/tauri" build \
+            --target universal-apple-darwin \
+            --bundles app \
+            --config src-tauri/tauri.release.conf.json
+
+      - name: Verify bundled Node slices against pinned upstream archives
+        env:
+          NODE_ARM64_SHA256: 61130f394c1630d211dd50aecc4353d379480f36d3ac913cd85dbba1aed585c6
+          NODE_X64_SHA256: 58e99022c2ff89395576cc7fd4d98cea24bb68081475d5f88b801ee8729fb026
+          SOURCE_DIR: ${{ steps.source.outputs.source_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          provenance="$RUNNER_TEMP/colony-node-provenance"
+          mkdir -p "$provenance/arm64" "$provenance/x64"
+          arm_archive="$provenance/node-v22.23.2-darwin-arm64.tar.gz"
+          x64_archive="$provenance/node-v22.23.2-darwin-x64.tar.gz"
+          curl --fail --show-error --silent --location --output "$arm_archive" \
+            https://nodejs.org/dist/v22.23.2/node-v22.23.2-darwin-arm64.tar.gz
+          curl --fail --show-error --silent --location --output "$x64_archive" \
+            https://nodejs.org/dist/v22.23.2/node-v22.23.2-darwin-x64.tar.gz
+          printf '%s  %s\n' "$NODE_ARM64_SHA256" "$arm_archive" | shasum -a 256 -c -
+          printf '%s  %s\n' "$NODE_X64_SHA256" "$x64_archive" | shasum -a 256 -c -
+          tar -xzf "$arm_archive" -C "$provenance/arm64"
+          tar -xzf "$x64_archive" -C "$provenance/x64"
+          staged_node="$SOURCE_DIR/colony/src-tauri/resources/runtime/node"
+          lipo -thin arm64 "$staged_node" -output "$provenance/staged-node-arm64"
+          lipo -thin x86_64 "$staged_node" -output "$provenance/staged-node-x64"
+          cmp "$provenance/staged-node-arm64" \
+            "$provenance/arm64/node-v22.23.2-darwin-arm64/bin/node"
+          cmp "$provenance/staged-node-x64" \
+            "$provenance/x64/node-v22.23.2-darwin-x64/bin/node"
+
+      - id: app
+        name: Resolve, audit, and smoke-test the source-built app
+        env:
+          SOURCE_DIR: ${{ steps.source.outputs.source_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          bundle_root="$SOURCE_DIR/colony/src-tauri/target/universal-apple-darwin/release/bundle"
+          apps=("$bundle_root/macos/"*.app)
+          [[ "${#apps[@]}" -eq 1 ]] || {
+            echo "::error::expected exactly one source-built Colony.app"
+            exit 1
+          }
+          app="${apps[0]}"
+          "$GITHUB_WORKSPACE/scripts/sign-macos-app.sh" "$app" "-"
+          "$SOURCE_DIR/colony/scripts/audit-macos-bundle.sh" "$app"
+          executable="$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")"
+          lipo "$app/Contents/MacOS/$executable" -verify_arch arm64 x86_64
+          lipo "$app/Contents/MacOS/colony-supervisor" -verify_arch arm64 x86_64
+          lipo "$app/Contents/Resources/runtime/node" -verify_arch arm64 x86_64
+
+          smoke_home="$(mktemp -d "$RUNNER_TEMP/colony-smoke-home.XXXXXX")"
+          log_path="$RUNNER_TEMP/colony-supervisor-smoke.log"
+          supervisor="$app/Contents/MacOS/colony-supervisor"
+          resources="$app/Contents/Resources"
+          HOME="$smoke_home" \
+            COLONY_WEB_DIR="$resources/web" \
+            ZTC_CLI="$resources/runtime/ztc/dist/cli_main.js" \
+            ZTC_NODE="$resources/runtime/node" \
+            ZTC_PLUGIN_PATHS="$resources/runtime/ztc-web-client" \
+            "$supervisor" serve --port 0 >"$log_path" 2>&1 &
+          supervisor_pid=$!
+          cleanup() {
+            if kill -0 "$supervisor_pid" 2>/dev/null; then
+              kill -TERM "$supervisor_pid"
+              wait "$supervisor_pid" || true
+            fi
+          }
+          trap cleanup EXIT
+          supervisor_url=""
+          for _ in {1..80}; do
+            supervisor_url="$(sed -n 's/.*Colony supervisor: \(http:\/\/127\.0\.0\.1:[0-9][0-9]*\/\).*/\1/p' "$log_path" | tail -1)"
+            [[ -n "$supervisor_url" ]] && break
+            sleep 0.25
+          done
+          [[ -n "$supervisor_url" ]] || {
+            cat "$log_path"
+            echo "::error::packaged supervisor did not become ready"
+            exit 1
+          }
+          curl --fail --show-error --silent "${supervisor_url}colony/state" | jq -e '.version >= 1'
+          [[ "$("$resources/runtime/node" --version)" == "$COLONY_RUNTIME_NODE_VERSION" ]]
+          "$resources/runtime/node" "$resources/runtime/ztc/dist/cli_main.js" --version
+          cleanup
+          trap - EXIT
+          echo "app=$app" >>"$GITHUB_OUTPUT"
+
+      - name: Package the unprivileged source payload
+        env:
+          APP_PATH: ${{ steps.app.outputs.app }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/colony-source-payload"
+          mkdir -p "$payload"
+          COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata --no-acls -h -czf "$payload/Colony.source.app.tar.gz" \
+            -C "$(dirname "$APP_PATH")" "$(basename "$APP_PATH")"
+          (
+            cd "$payload"
+            shasum -a 256 Colony.source.app.tar.gz >SHA256SUMS
+          )
+
+      - name: Upload source-built app for the fresh signing runner
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: colony-source-app
+          path: ${{ runner.temp }}/colony-source-payload
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  apple_sign:
+    name: Sign and notarize on a fresh public-code runner
+    needs: [validate, source_build]
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 45
+    environment:
+      name: colony-apple-${{ needs.validate.outputs.channel }}
+    permissions:
+      contents: read
+    env:
+      COLONY_CHANNEL: ${{ needs.validate.outputs.channel }}
+      COLONY_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+
+      - name: Test trusted signing policy before handling source output
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+
+      - name: Download source app without source checkout
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: colony-source-app
+          path: ${{ runner.temp }}/colony-source-payload
+
+      - id: input
+        name: Verify and extract source payload before importing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/colony-source-payload"
+          (cd "$payload" && shasum -a 256 -c SHA256SUMS)
+          archive="$payload/Colony.source.app.tar.gz"
+          node scripts/app-archive-policy.mjs "$archive"
+          input="$RUNNER_TEMP/colony-apple-input"
+          mkdir -p "$input"
+          tar -xzf "$archive" -C "$input"
+          app="$input/Colony.app"
+          node scripts/mac-bundle-policy.mjs "$app"
+          executable="$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist")"
+          lipo "$app/Contents/MacOS/$executable" -verify_arch arm64 x86_64
+          lipo "$app/Contents/MacOS/colony-supervisor" -verify_arch arm64 x86_64
+          lipo "$app/Contents/Resources/runtime/node" -verify_arch arm64 x86_64
+          echo "app=$app" >>"$GITHUB_OUTPUT"
+
+      - id: signed
+        name: Apply preview ad-hoc or fail-closed stable Apple identity
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.COLONY_APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.COLONY_APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.COLONY_APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.COLONY_APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.COLONY_APPLE_API_ISSUER }}
+          APPLE_API_KEY_ID: ${{ secrets.COLONY_APPLE_API_KEY_ID }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.COLONY_APPLE_API_PRIVATE_KEY }}
+          APP_PATH: ${{ steps.input.outputs.app }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          identity="-"
+          expected_team=""
+          notarized=false
+          api_key_path=""
+          if [[ "$COLONY_CHANNEL" == "stable" ]]; then
+            for name in \
+              APPLE_CERTIFICATE \
+              APPLE_CERTIFICATE_PASSWORD \
+              APPLE_SIGNING_IDENTITY \
+              APPLE_TEAM_ID \
+              APPLE_API_ISSUER \
+              APPLE_API_KEY_ID \
+              APPLE_API_PRIVATE_KEY; do
+              [[ -n "${!name}" ]] || {
+                echo "::error::colony-apple-stable requires $name"
+                exit 1
+              }
+            done
+            certificate_path="$RUNNER_TEMP/colony-developer-id.p12"
+            keychain_path="$RUNNER_TEMP/colony-build.keychain-db"
+            password_path="$RUNNER_TEMP/colony-keychain.password"
+            api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+            printf '%s' "$APPLE_CERTIFICATE" | base64 --decode >"$certificate_path"
+            printf '%s\n' "$APPLE_API_PRIVATE_KEY" >"$api_key_path"
+            openssl rand -hex 32 >"$password_path"
+            chmod 600 "$certificate_path" "$api_key_path" "$password_path"
+            keychain_password="$(cat "$password_path")"
+            security create-keychain -p "$keychain_password" "$keychain_path"
+            security set-keychain-settings -lut 21600 "$keychain_path"
+            security unlock-keychain -p "$keychain_password" "$keychain_path"
+            security import "$certificate_path" -k "$keychain_path" \
+              -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+            security set-key-partition-list -S apple-tool:,apple:,codesign: \
+              -s -k "$keychain_password" "$keychain_path"
+            security list-keychains -d user -s "$keychain_path"
+            security find-identity -v -p codesigning "$keychain_path" \
+              | grep -F "\"$APPLE_SIGNING_IDENTITY\""
+            identity="$APPLE_SIGNING_IDENTITY"
+            expected_team="$APPLE_TEAM_ID"
+            notarized=true
+          fi
+
+          scripts/sign-macos-app.sh "$APP_PATH" "$identity"
+          if [[ "$COLONY_CHANNEL" == "stable" ]]; then
+            app_zip="$RUNNER_TEMP/Colony.notary.zip"
+            ditto -c -k --keepParent "$APP_PATH" "$app_zip"
+            xcrun notarytool submit "$app_zip" \
+              --key "$api_key_path" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" \
+              --wait
+            xcrun stapler staple "$APP_PATH"
+          fi
+
+          output="$RUNNER_TEMP/colony-apple-output"
+          mkdir -p "$output"
+          dmg="$output/Colony_${COLONY_VERSION}_universal.dmg"
+          hdiutil create -volname Colony -srcfolder "$APP_PATH" -ov -format UDZO "$dmg"
+          dmg_args=(--force --sign "$identity")
+          if [[ "$identity" != "-" ]]; then dmg_args+=(--timestamp); fi
+          codesign "${dmg_args[@]}" "$dmg"
+          if [[ "$COLONY_CHANNEL" == "stable" ]]; then
+            xcrun notarytool submit "$dmg" \
+              --key "$api_key_path" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" \
+              --wait
+            xcrun stapler staple "$dmg"
+          fi
+
+          COLONY_EXPECT_APPLE_TEAM_ID="$expected_team" \
+            COLONY_REQUIRE_GATEKEEPER="$([[ "$COLONY_CHANNEL" == stable ]] && echo true || echo false)" \
+            scripts/audit-macos-app.sh "$APP_PATH"
+          if [[ "$COLONY_CHANNEL" == "stable" ]]; then
+            xcrun stapler validate "$APP_PATH"
+            xcrun stapler validate "$dmg"
+            spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+          fi
+          du -sh "$APP_PATH" "$dmg"
+          COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata --no-acls -h -czf "$output/Colony.signed.app.tar.gz" \
+            -C "$(dirname "$APP_PATH")" "$(basename "$APP_PATH")"
+          (
+            cd "$output"
+            shasum -a 256 Colony.signed.app.tar.gz "$(basename "$dmg")" >SHA256SUMS
+          )
+          echo "notarized=$notarized" >>"$GITHUB_OUTPUT"
+
+      - name: Upload signed app and DMG for isolated updater signing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: colony-apple-payload
+          path: ${{ runner.temp }}/colony-apple-output
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Remove ephemeral Apple signing material
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          keychain_path="$RUNNER_TEMP/colony-build.keychain-db"
+          if [[ -f "$keychain_path" ]]; then security delete-keychain "$keychain_path" || true; fi
+          rm -f \
+            "$RUNNER_TEMP/colony-developer-id.p12" \
+            "$RUNNER_TEMP/colony-keychain.password" \
+            "$RUNNER_TEMP"/AuthKey_*.p8
+
+  updater_sign:
+    name: Sign updater archive on a fresh public-repo-only runner
+    needs: [validate, apple_sign]
+    if: github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 30
+    environment:
+      name: colony-updater-${{ needs.validate.outputs.channel }}
+    permissions:
+      contents: read
+    env:
+      COLONY_CHANNEL: ${{ needs.validate.outputs.channel }}
+      COLONY_RELEASE_DATE: ${{ needs.validate.outputs.requested_at }}
+      COLONY_RUNTIME_NODE_VERSION: v22.23.2
+      COLONY_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+
+      - name: Install and test only the public release repository
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+
+      - name: Download Apple-signed payload
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: colony-apple-payload
+          path: ${{ runner.temp }}/colony-apple-payload
+
+      - id: archive
+        name: Verify signed payload and create the updater archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          payload="$RUNNER_TEMP/colony-apple-payload"
+          (cd "$payload" && shasum -a 256 -c SHA256SUMS)
+          transport="$payload/Colony.signed.app.tar.gz"
+          node scripts/app-archive-policy.mjs "$transport"
+          extracted="$RUNNER_TEMP/colony-updater-input"
+          mkdir -p "$extracted"
+          tar -xzf "$transport" -C "$extracted"
+          app="$extracted/Colony.app"
+          require_gatekeeper=false
+          if [[ "$COLONY_CHANNEL" == "stable" ]]; then require_gatekeeper=true; fi
+          COLONY_REQUIRE_GATEKEEPER="$require_gatekeeper" scripts/audit-macos-app.sh "$app"
+          if [[ "$COLONY_CHANNEL" == "stable" ]]; then
+            xcrun stapler validate "$app"
+            xcrun stapler validate "$payload/Colony_${COLONY_VERSION}_universal.dmg"
+          fi
+          unsigned="$RUNNER_TEMP/colony-unsigned-release"
+          mkdir -p "$unsigned"
+          archive="$unsigned/Colony_${COLONY_VERSION}_universal.app.tar.gz"
+          COPYFILE_DISABLE=1 tar --no-xattrs --no-mac-metadata --no-acls -h -czf "$archive" \
+            -C "$(dirname "$app")" "$(basename "$app")"
+          node scripts/app-archive-policy.mjs "$archive"
+          cp "$payload/Colony_${COLONY_VERSION}_universal.dmg" "$unsigned/"
+          echo "archive=$archive" >>"$GITHUB_OUTPUT"
+          echo "input_dir=$unsigned" >>"$GITHUB_OUTPUT"
+
+      - name: Sign archive with the updater key and no source checkout
+        env:
+          ARCHIVE_PATH: ${{ steps.archive.outputs.archive }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.COLONY_TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.COLONY_TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$TAURI_SIGNING_PRIVATE_KEY" && -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]] || {
+            echo "::error::updater environment is missing the Colony updater key pair"
+            exit 1
+          }
+          "$GITHUB_WORKSPACE/node_modules/.bin/tauri" signer sign "$ARCHIVE_PATH"
+          [[ -s "$ARCHIVE_PATH.sig" ]] || {
+            echo "::error::trusted updater signer produced no signature"
+            exit 1
+          }
+
+      - name: Collect immutable assets with public-repository code
+        env:
+          COLONY_APPLE_NOTARIZED: ${{ needs.validate.outputs.channel == 'stable' && 'true' || 'false' }}
+          COLONY_RELEASE_NOTES: Colony ${{ needs.validate.outputs.version }} (${{ needs.validate.outputs.channel }})
+          COLONY_RELEASE_REPOSITORY: ${{ github.repository }}
+          COLONY_RUNTIME_NODE_VERSION: v22.23.2
+          INPUT_DIR: ${{ steps.archive.outputs.input_dir }}
+          REQUEST_PATH: ${{ needs.validate.outputs.request_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="$RUNNER_TEMP/colony-release"
+          node scripts/collect-release.mjs "$REQUEST_PATH" "$INPUT_DIR" "$release_dir"
+          (
+            cd "$release_dir"
+            shasum -a 256 -c checksums.txt
+            shasum -a 256 \
+              ./*.dmg \
+              ./*.app.tar.gz \
+              ./*.app.tar.gz.sig \
+              checksums.txt \
+              latest.json \
+              release-metadata.json \
+              >TRANSPORT-SHA256SUMS
+          )
+
+      - name: Upload updater-signed publication payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: colony-release-payload
+          path: ${{ runner.temp }}/colony-release
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    name: Verify and publish with contents write on Ubuntu
+    needs: [validate, updater_sign]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: colony-feed
+    permissions:
+      contents: write
+    env:
+      COLONY_CHANNEL: ${{ needs.validate.outputs.channel }}
+      COLONY_RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+      COLONY_REQUEST_COMMIT: ${{ needs.validate.outputs.request_commit }}
+      COLONY_SOURCE_SHA: ${{ needs.validate.outputs.source_sha }}
+      COLONY_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+
+      - name: Test public publication policy before granting artifact trust
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+
+      - name: Download updater-signed payload
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: colony-release-payload
+          path: ${{ runner.temp }}/colony-release
+
+      - name: Verify artifact transport and checksum-pinned updater signature
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/colony-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd "$RELEASE_DIR"
+            shasum -a 256 -c TRANSPORT-SHA256SUMS
+            rm TRANSPORT-SHA256SUMS
+          )
+          verifier_archive="$RUNNER_TEMP/minisign-0.12-linux.tar.gz"
+          curl --fail --show-error --silent --location \
+            --output "$verifier_archive" \
+            https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+          printf '%s  %s\n' \
+            9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73 \
+            "$verifier_archive" | shasum -a 256 -c -
+          tar -xzf "$verifier_archive" -C "$RUNNER_TEMP"
+          shopt -s nullglob
+          archives=("$RELEASE_DIR/"*.app.tar.gz)
+          [[ "${#archives[@]}" -eq 1 ]]
+          archive="${archives[0]}"
+          decoded_key="$RUNNER_TEMP/colony-updater-minisign.pub"
+          decoded_signature="$RUNNER_TEMP/colony-updater.minisig"
+          updater_key_file="updater.${COLONY_CHANNEL}.pubkey"
+          base64 --decode "$updater_key_file" >"$decoded_key"
+          base64 --decode "$archive.sig" >"$decoded_signature"
+          "$RUNNER_TEMP/minisign-linux/x86_64/minisign" \
+            -Vm "$archive" -x "$decoded_signature" -p "$decoded_key"
+
+          encoded_tag="$(jq -rn --arg value "$COLONY_RELEASE_TAG" '$value|@uri')"
+          archive_name="$(basename "$archive")"
+          encoded_archive="$(jq -rn --arg value "$archive_name" '$value|@uri')"
+          expected_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$encoded_tag/$encoded_archive"
+          expected_signature="$(tr -d '\r\n' <"$archive.sig")"
+          jq -e \
+            --arg version "$COLONY_VERSION" \
+            --arg url "$expected_url" \
+            --arg signature "$expected_signature" \
+            '.version == $version
+              and .platforms["darwin-aarch64"].url == $url
+              and .platforms["darwin-x86_64"].url == $url
+              and .platforms["darwin-aarch64"].signature == $signature
+              and .platforms["darwin-x86_64"].signature == $signature' \
+            "$RELEASE_DIR/latest.json"
+
+      - name: Create or resume the exact immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_DIR: ${{ runner.temp }}/colony-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(
+            "$RELEASE_DIR/"*.dmg
+            "$RELEASE_DIR/"*.app.tar.gz
+            "$RELEASE_DIR/"*.app.tar.gz.sig
+            "$RELEASE_DIR/checksums.txt"
+            "$RELEASE_DIR/latest.json"
+            "$RELEASE_DIR/release-metadata.json"
+          )
+          [[ "${#assets[@]}" -eq 6 ]] || {
+            echo "::error::expected exactly six immutable release assets; found ${#assets[@]}"
+            exit 1
+          }
+          release_title="Colony $COLONY_VERSION"
+          release_body="Verified Colony $COLONY_CHANNEL release from Epoch-ML/zerg@$COLONY_SOURCE_SHA."
+          expected_prerelease=false
+          create_flags=(
+            --repo "$GITHUB_REPOSITORY"
+            --target "$COLONY_REQUEST_COMMIT"
+            --title "$release_title"
+            --notes "$release_body"
+          )
+          if [[ "$COLONY_CHANNEL" == "preview" ]]; then
+            expected_prerelease=true
+            create_flags+=(--prerelease)
+          fi
+          verify_release_tag_target() {
+            git fetch --force --no-tags origin "refs/tags/$COLONY_RELEASE_TAG"
+            release_tag_commit="$(git rev-parse 'FETCH_HEAD^{commit}')"
+            [[ "$release_tag_commit" == "$COLONY_REQUEST_COMMIT" ]] || {
+              echo "::error::release tag targets $release_tag_commit, expected $COLONY_REQUEST_COMMIT"
+              exit 1
+            }
+          }
+          verify_release_tag_target
+          if ! gh release view "$COLONY_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$COLONY_RELEASE_TAG" --draft --verify-tag "${create_flags[@]}"
+          fi
+
+          release_json="$RUNNER_TEMP/colony-release.json"
+          fetch_release() {
+            local release_id
+            release_id="$(gh release view "$COLONY_RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" --json databaseId --jq '.databaseId')"
+            gh api \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/releases/$release_id" >"$release_json"
+          }
+          verify_metadata() {
+            jq -e \
+              --arg tag "$COLONY_RELEASE_TAG" \
+              --arg target "$COLONY_REQUEST_COMMIT" \
+              --arg title "$release_title" \
+              --arg body "$release_body" \
+              --argjson prerelease "$expected_prerelease" \
+              '.tag_name == $tag
+                and .target_commitish == $target
+                and .name == $title
+                and .body == $body
+                and .prerelease == $prerelease
+                and .draft != null' \
+              "$release_json"
+          }
+          fetch_release
+          verify_metadata
+          expected_asset_names="$RUNNER_TEMP/colony-expected-assets.txt"
+          existing_asset_names="$RUNNER_TEMP/colony-existing-assets.txt"
+          for asset in "${assets[@]}"; do basename "$asset"; done \
+            | LC_ALL=C sort >"$expected_asset_names"
+          jq -r '.assets[].name' "$release_json" | LC_ALL=C sort >"$existing_asset_names"
+          while IFS= read -r existing_name; do
+            grep -Fqx "$existing_name" "$expected_asset_names" || {
+              echo "::error::existing release contains unexpected asset $existing_name"
+              exit 1
+            }
+          done <"$existing_asset_names"
+
+          release_is_draft="$(jq -r '.draft' "$release_json")"
+          authenticated_assets="$RUNNER_TEMP/colony-authenticated-assets"
+          mkdir -p "$authenticated_assets"
+          for asset in "${assets[@]}"; do
+            name="$(basename "$asset")"
+            asset_id="$(jq -r --arg name "$name" \
+              '.assets[] | select(.name == $name) | .id' "$release_json")"
+            if [[ -n "$asset_id" ]]; then
+              gh api --header 'Accept: application/octet-stream' \
+                "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+                >"$authenticated_assets/$name"
+              cmp "$asset" "$authenticated_assets/$name"
+            elif [[ "$release_is_draft" == "true" ]]; then
+              gh release upload "$COLONY_RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY"
+            else
+              echo "::error::published immutable release is missing $name"
+              exit 1
+            fi
+          done
+          fetch_release
+          verify_metadata
+          jq -r '.assets[].name' "$release_json" | LC_ALL=C sort >"$existing_asset_names"
+          diff -u "$expected_asset_names" "$existing_asset_names"
+
+          echo 'Compare existing release asset bytes after uploads'
+          for asset in "${assets[@]}"; do
+            name="$(basename "$asset")"
+            asset_id="$(jq -er --arg name "$name" \
+              '.assets[] | select(.name == $name) | .id' "$release_json")"
+            gh api --header 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              >"$authenticated_assets/$name"
+            cmp "$asset" "$authenticated_assets/$name"
+          done
+          if [[ "$(jq -r '.draft' "$release_json")" == "true" ]]; then
+            gh release edit "$COLONY_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          fi
+          fetch_release
+          verify_metadata
+          verify_release_tag_target
+          if [[ "$(jq -r '.draft' "$release_json")" != "false" \
+            || "$(jq -r '.immutable' "$release_json")" != "true" ]]; then
+            echo "::error::GitHub release immutability is not enabled"
+            exit 1
+          fi
+
+      - name: Re-download every release asset over HTTPS and compare bytes
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/colony-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          verified_dir="$(mktemp -d "$RUNNER_TEMP/colony-https-assets.XXXXXX")"
+          encoded_tag="$(jq -rn --arg value "$COLONY_RELEASE_TAG" '$value|@uri')"
+          assets=(
+            "$RELEASE_DIR/"*.dmg
+            "$RELEASE_DIR/"*.app.tar.gz
+            "$RELEASE_DIR/"*.app.tar.gz.sig
+            "$RELEASE_DIR/checksums.txt"
+            "$RELEASE_DIR/latest.json"
+            "$RELEASE_DIR/release-metadata.json"
+          )
+          for asset in "${assets[@]}"; do
+            name="$(basename "$asset")"
+            encoded_name="$(jq -rn --arg value "$name" '$value|@uri')"
+            url="https://github.com/$GITHUB_REPOSITORY/releases/download/$encoded_tag/$encoded_name"
+            curl --fail --show-error --location \
+              --retry 8 --retry-all-errors --retry-delay 2 \
+              --output "$verified_dir/$name" "$url"
+            cmp "$asset" "$verified_dir/$name"
+          done
+
+      - id: feed
+        name: Persist the verified update manifest on release-data
+        env:
+          FEED_DEPLOY_KEY: ${{ secrets.COLONY_FEED_DEPLOY_KEY }}
+          RELEASE_DIR: ${{ runner.temp }}/colony-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -n "$FEED_DEPLOY_KEY" ]] || {
+            echo "::error::COLONY_FEED_DEPLOY_KEY is not configured in colony-feed"
+            exit 1
+          }
+          key_path="$RUNNER_TEMP/colony-feed-deploy-key"
+          known_hosts="$RUNNER_TEMP/colony-feed-github-known-hosts"
+          meta_keys="$RUNNER_TEMP/colony-feed-github-meta-keys"
+          scanned_keys="$RUNNER_TEMP/colony-feed-github-scanned-keys"
+          trap 'rm -f "$key_path"' EXIT
+          printf '%s\n' "$FEED_DEPLOY_KEY" >"$key_path"
+          chmod 600 "$key_path"
+          curl --fail --show-error --silent --location \
+            --header 'Accept: application/vnd.github+json' \
+            https://api.github.com/meta \
+            | jq -r '.ssh_keys[]' >"$meta_keys"
+          ssh-keyscan -t rsa,ecdsa,ed25519 github.com 2>/dev/null >"$scanned_keys"
+          : >"$known_hosts"
+          while read -r _host algorithm key; do
+            grep -Fqx "$algorithm $key" "$meta_keys" || {
+              echo "::error::ssh-keyscan returned a key absent from GitHub authenticated metadata"
+              exit 1
+            }
+            printf 'github.com %s %s\n' "$algorithm" "$key" >>"$known_hosts"
+          done <"$scanned_keys"
+          [[ -s "$known_hosts" ]] || {
+            echo "::error::no verified GitHub SSH host keys were discovered"
+            exit 1
+          }
+          export GIT_SSH_COMMAND="ssh -i $key_path -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"
+          data_repo="$(mktemp -d "$RUNNER_TEMP/colony-release-data.XXXXXX")"
+          git init --initial-branch=release-data "$data_repo"
+          git -C "$data_repo" remote add origin "git@github.com:${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads origin \
+            refs/heads/release-data >/dev/null 2>&1; then
+            git -C "$data_repo" fetch --depth=1 origin refs/heads/release-data
+            git -C "$data_repo" checkout -B release-data FETCH_HEAD
+          fi
+          mkdir -p "$data_repo/site"
+          if find "$data_repo/site" -type l -print -quit | grep -q .; then
+            echo "::error::release-data must not contain symbolic links"
+            exit 1
+          fi
+          node scripts/update-feed.mjs \
+            "$COLONY_CHANNEL" "$RELEASE_DIR/latest.json" "$data_repo/site"
+          cmp "$RELEASE_DIR/latest.json" \
+            "$data_repo/site/$COLONY_CHANNEL/latest.json"
+          cmp "$RELEASE_DIR/latest.json" \
+            "$data_repo/site/$COLONY_CHANNEL/releases/$COLONY_VERSION.json"
+          touch "$data_repo/site/.nojekyll"
+          if find "$data_repo/site" -type l -print -quit | grep -q .; then
+            echo "::error::release-data policy introduced a symbolic link"
+            exit 1
+          fi
+          git -C "$data_repo" config user.name github-actions[bot]
+          git -C "$data_repo" config user.email \
+            41898282+github-actions[bot]@users.noreply.github.com
+          git -C "$data_repo" add -- site
+          if ! git -C "$data_repo" diff --cached --quiet; then
+            git -C "$data_repo" commit -m "release: publish $COLONY_RELEASE_TAG manifest"
+            git -C "$data_repo" push origin HEAD:refs/heads/release-data
+          fi
+          echo "site_path=$data_repo/site" >>"$GITHUB_OUTPUT"
+
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: ${{ steps.feed.outputs.site_path }}
+
+  deploy:
+    name: Deploy verified channel feeds to GitHub Pages
+    needs: publish
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    outputs:
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+
+      - id: deployment
+        name: Deploy channel feeds
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+
+  verify_live:
+    name: Verify the deployed updater feed over HTTPS
+    needs: [validate, deploy]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Download the exact updater-signed payload
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: colony-release-payload
+          path: ${{ runner.temp }}/colony-release
+
+      - name: Compare the live Pages feed with the signed publication payload
+        env:
+          CACHE_BUSTER: ${{ github.run_id }}-${{ github.run_attempt }}
+          COLONY_CHANNEL: ${{ needs.validate.outputs.channel }}
+          EXPECTED_PAGE_URL: https://epoch-ml.github.io/colony-releases/
+          PAGE_URL: ${{ needs.deploy.outputs.page_url }}
+          RELEASE_DIR: ${{ runner.temp }}/colony-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$PAGE_URL" == https://* ]] || {
+            echo "::error::GitHub Pages did not return an HTTPS deployment URL"
+            exit 1
+          }
+          [[ "${PAGE_URL%/}/" == "$EXPECTED_PAGE_URL" ]] || {
+            echo "::error::Pages deployed to $PAGE_URL, expected $EXPECTED_PAGE_URL"
+            exit 1
+          }
+          live_manifest="$RUNNER_TEMP/colony-live-latest.json"
+          feed_url="${PAGE_URL%/}/$COLONY_CHANNEL/latest.json?run=$CACHE_BUSTER"
+          curl --fail --show-error --location \
+            --retry 12 --retry-all-errors --retry-delay 5 \
+            --output "$live_manifest" "$feed_url"
+          cmp "$RELEASE_DIR/latest.json" "$live_manifest"
