@@ -1131,9 +1131,40 @@ jobs:
           fi
           echo "site_path=$data_repo/site" >>"$GITHUB_OUTPUT"
 
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+      - name: Build deterministic Pages artifact
+        env:
+          SITE_PATH: ${{ steps.feed.outputs.site_path }}
+          PAGES_ARTIFACT: ${{ runner.temp }}/artifact.tar
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -d "$SITE_PATH" ]]
+          if find "$SITE_PATH" ! -type d ! -type f -print -quit | grep -q .; then
+            echo "::error::Pages input must contain only directories and regular files"
+            exit 1
+          fi
+          artifact_root="$(mktemp -d "$RUNNER_TEMP/colony-pages.XXXXXX")"
+          trap 'rm -rf "$artifact_root"' EXIT
+          cp -R "$SITE_PATH/." "$artifact_root/"
+          find "$artifact_root" -type d -exec chmod 0755 {} +
+          find "$artifact_root" -type f -exec chmod 0644 {} +
+          LC_ALL=C tar \
+            --format=ustar \
+            --sort=name \
+            --mtime='UTC 1970-01-01' \
+            --owner=0 \
+            --group=0 \
+            --numeric-owner \
+            -cf "$PAGES_ARTIFACT" \
+            -C "$artifact_root" .
+
+      - name: Upload deterministic Pages artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          path: ${{ steps.feed.outputs.site_path }}
+          name: github-pages
+          path: ${{ runner.temp }}/artifact.tar
+          if-no-files-found: error
+          retention-days: 1
 
   deploy:
     name: Deploy verified channel feeds to GitHub Pages

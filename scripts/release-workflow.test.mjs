@@ -586,7 +586,7 @@ test("request branches stay unprivileged and live feeds publish outside protecte
   assert.match(verifyLive, /latest\.json/);
   assert.match(verifyLive, /cmp /);
 
-  const pagesUpload = workflow.indexOf("actions/upload-pages-artifact@");
+  const pagesUpload = workflow.indexOf("name: Upload deterministic Pages artifact");
   const pagesDeploy = workflow.indexOf("actions/deploy-pages@");
   const liveVerification = workflow.indexOf("verify_live:");
   assert.ok(pagesUpload >= 0 && pagesDeploy > pagesUpload && liveVerification > pagesDeploy);
