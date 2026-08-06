@@ -212,9 +212,14 @@ test("immutable assets are verified over HTTPS before the Pages manifest moves",
 });
 
 test("post-release retries verify and resume an exact immutable release", () => {
+  const publish = job("publish", "feed");
   assert.doesNotMatch(workflow, /already exists; publish a higher version/);
   assert.match(workflow, /COLONY_REQUEST_COMMIT/);
-  assert.match(workflow, /\.target_commitish == \$target/);
+  assert.doesNotMatch(
+    publish,
+    /--target "\$COLONY_REQUEST_COMMIT"|\.target_commitish/,
+    "the pre-existing verified tag, not a release-create target write, owns release identity",
+  );
   assert.match(workflow, /\.tag_name == \$tag/);
   assert.match(workflow, /\.name == \$title/);
   assert.match(workflow, /\.body == \$body/);
