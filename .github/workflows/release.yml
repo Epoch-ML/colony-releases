@@ -191,7 +191,7 @@ jobs:
             --header "Authorization: Bearer $GITHUB_META_TOKEN" \
             https://api.github.com/meta \
             | jq -r '.ssh_keys[]' >"$meta_keys"
-          ssh-keyscan -q -t rsa,ecdsa,ed25519 github.com 2>/dev/null >"$scanned_keys"
+          ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github.com 2>/dev/null >"$scanned_keys"
           : >"$known_hosts"
           while read -r _host algorithm key extra; do
             if [[ -z "$_host" || "${_host:0:1}" == "#" ]]; then
@@ -1075,7 +1075,7 @@ jobs:
             --header "Authorization: Bearer $GITHUB_META_TOKEN" \
             https://api.github.com/meta \
             | jq -r '.ssh_keys[]' >"$meta_keys"
-          ssh-keyscan -q -t rsa,ecdsa,ed25519 github.com 2>/dev/null >"$scanned_keys"
+          ssh-keyscan -T 10 -t rsa,ecdsa,ed25519 github.com 2>/dev/null >"$scanned_keys"
           : >"$known_hosts"
           while read -r _host algorithm key extra; do
             if [[ -z "$_host" || "${_host:0:1}" == "#" ]]; then
