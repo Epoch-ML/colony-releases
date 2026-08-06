@@ -43,7 +43,7 @@ test("public releases build an exact verified source revision on universal macOS
   );
   assert.equal(
     workflow.match(/node-version:\s*"22\.23\.2"/g)?.length,
-    6,
+    7,
     "every JavaScript boundary must use the exact Node patch bundled into Colony",
   );
   assert.match(workflow, /COLONY_RUNTIME_NODE_VERSION:\s*v22\.23\.2/);
@@ -77,15 +77,15 @@ test("public releases build an exact verified source revision on universal macOS
       "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
       "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
       "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
-      "actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b",
-      "actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e",
+      "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
       "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
     ],
     "publication must execute only immutable GitHub-owned actions",
   );
   assert.equal(
     workflow.match(/persist-credentials:\s*false/g)?.length,
-    6,
+    7,
     "no checkout may persist a releases-repository token",
   );
   assert.match(
@@ -231,10 +231,10 @@ test("immutable assets are verified over HTTPS before the Pages manifest moves",
   assert.match(workflow, /gh release create/);
   assert.match(workflow, /curl --fail --show-error --location/);
   assert.match(workflow, /cmp /);
-  assert.match(workflow, /actions\/deploy-pages/);
+  assert.match(workflow, /node scripts\/deploy-pages\.mjs/);
   assert.match(
     workflow,
-    /deploy:\n(?:.|\n)*?needs: feed(?:.|\n)*?name: github-pages(?:.|\n)*?actions\/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e/,
+    /deploy:\n(?:.|\n)*?needs: feed(?:.|\n)*?name: github-pages(?:.|\n)*?node scripts\/deploy-pages\.mjs/,
     "Pages deployment must use its dedicated protected environment after feed promotion",
   );
 
@@ -648,7 +648,8 @@ test("request branches stay unprivileged and live feeds publish outside protecte
   assert.doesNotMatch(feed, /HEAD:main|git add "?site\//);
   assert.doesNotMatch(publish, /release-data|COLONY_FEED_DEPLOY_KEY|colony-feed/);
   assert.match(deploy, /needs:\s*feed/);
-  assert.match(deploy, /actions\/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e/);
+  assert.match(deploy, /node scripts\/deploy-pages\.mjs/);
+  assert.doesNotMatch(deploy, /actions\/deploy-pages@/);
   assert.match(verifyLive, /needs:\s*\[validate, deploy\]/);
   assert.match(verifyLive, /curl --fail --show-error --location/);
   assert.match(verifyLive, /EXPECTED_PAGE_URL:\s*https:\/\/epoch-ml\.github\.io\/colony-releases\//);
@@ -658,7 +659,7 @@ test("request branches stay unprivileged and live feeds publish outside protecte
   assert.match(verifyLive, /cmp /);
 
   const pagesUpload = workflow.indexOf("name: Upload deterministic Pages artifact");
-  const pagesDeploy = workflow.indexOf("actions/deploy-pages@");
+  const pagesDeploy = workflow.indexOf("node scripts/deploy-pages.mjs");
   const liveVerification = workflow.indexOf("verify_live:");
   assert.ok(pagesUpload >= 0 && pagesDeploy > pagesUpload && liveVerification > pagesDeploy);
 });
