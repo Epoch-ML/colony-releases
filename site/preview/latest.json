@@ -1,0 +1,15 @@
+{
+  "version": "0.1.1-preview.3",
+  "notes": "Colony 0.1.1-preview.3 (preview)",
+  "pub_date": "2026-08-06T11:27:38.000Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTQVVVZ3dwYTJrajZ0NVRuRXlIbytwaEZhVGNhUFFqalB4THhveHlkT3NJaVN2Yzc4VWxuYWJXQURSYzVuZEx6Uk1EU2tjRGZRRGU2eDF1Rk1KNDg1SzZ1eWVDMitTVFE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2MDIwODM4CWZpbGU6Q29sb255XzAuMS4xLXByZXZpZXcuM191bml2ZXJzYWwuYXBwLnRhci5negp0Q29oTUVWYmI2a2plLyt3WVFQcFVTL093RGtaYmRGVVV0dy9vSEM3R2w0SVd2WmQ2NzdsbW1NbzhPRkdpNTJuUHVyc3RQTjVNWmpkc1VEdkEwa3RDZz09Cg==",
+      "url": "https://github.com/Epoch-ML/colony-releases/releases/download/colony-desktop-preview-v0.1.1-preview.3/Colony_0.1.1-preview.3_universal.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTQVVVZ3dwYTJrajZ0NVRuRXlIbytwaEZhVGNhUFFqalB4THhveHlkT3NJaVN2Yzc4VWxuYWJXQURSYzVuZEx6Uk1EU2tjRGZRRGU2eDF1Rk1KNDg1SzZ1eWVDMitTVFE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2MDIwODM4CWZpbGU6Q29sb255XzAuMS4xLXByZXZpZXcuM191bml2ZXJzYWwuYXBwLnRhci5negp0Q29oTUVWYmI2a2plLyt3WVFQcFVTL093RGtaYmRGVVV0dy9vSEM3R2w0SVd2WmQ2NzdsbW1NbzhPRkdpNTJuUHVyc3RQTjVNWmpkc1VEdkEwa3RDZz09Cg==",
+      "url": "https://github.com/Epoch-ML/colony-releases/releases/download/colony-desktop-preview-v0.1.1-preview.3/Colony_0.1.1-preview.3_universal.app.tar.gz"
+    }
+  }
+}
