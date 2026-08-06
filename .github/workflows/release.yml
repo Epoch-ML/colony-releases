@@ -109,6 +109,7 @@ jobs:
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
           npm test
+          npm audit --audit-level=moderate
 
       - id: request
         name: Validate request schema and provenance
@@ -710,7 +711,6 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-    environment: colony-feed
     permissions:
       contents: write
     env:
@@ -945,6 +945,57 @@ jobs:
             cmp "$asset" "$verified_dir/$name"
           done
 
+  feed:
+    name: Promote the verified feed without GitHub Release write authority
+    needs: [validate, publish]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: colony-feed
+    permissions:
+      contents: read
+    env:
+      COLONY_CHANNEL: ${{ needs.validate.outputs.channel }}
+      COLONY_RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
+      COLONY_VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22.23.2"
+
+      - name: Test public feed policy before granting branch authority
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm test
+
+      - name: Download the updater-signed publication payload
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: colony-release-payload
+          path: ${{ runner.temp }}/colony-release
+
+      - name: Bind the feed candidate to the immutable public release
+        env:
+          RELEASE_DIR: ${{ runner.temp }}/colony-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd "$RELEASE_DIR"
+            shasum -a 256 -c TRANSPORT-SHA256SUMS
+          )
+          encoded_tag="$(jq -rn --arg value "$COLONY_RELEASE_TAG" '$value|@uri')"
+          published_manifest="$RUNNER_TEMP/colony-published-latest.json"
+          curl --fail --show-error --location \
+            --retry 8 --retry-all-errors --retry-delay 2 \
+            --output "$published_manifest" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$encoded_tag/latest.json"
+          cmp "$RELEASE_DIR/latest.json" "$published_manifest"
+
       - id: feed
         name: Persist the verified update manifest on release-data
         env:
@@ -1022,7 +1073,7 @@ jobs:
 
   deploy:
     name: Deploy verified channel feeds to GitHub Pages
-    needs: publish
+    needs: feed
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
