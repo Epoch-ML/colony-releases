@@ -260,16 +260,27 @@ test("Pages uses a deterministic artifact uploaded through an immutable direct a
   );
 });
 
-test("Pages deployment tolerates a bounded queue longer than the action default", () => {
+test("Pages deployment leaves a long queue recoverable instead of cancelling it", () => {
+  const feed = job("feed", "deploy");
   const deploy = job("deploy", "verify_live");
 
+  assert.match(
+    feed,
+    /outputs:\n\s+pages_artifact_id: \$\{\{ steps\.pages-artifact\.outputs\.artifact-id \}\}/,
+  );
+  assert.match(feed, /id: pages-artifact(?:.|\n)*?uses: actions\/upload-artifact@/);
   assert.match(deploy, /timeout-minutes: 35/);
+  assert.doesNotMatch(
+    deploy,
+    /actions\/deploy-pages@/,
+    "the upstream action hard-cancels queued deployments at ten minutes",
+  );
+  assert.match(deploy, /node scripts\/deploy-pages\.mjs/);
+  assert.match(deploy, /PAGES_DEPLOY_TIMEOUT_MS: "1800000"/);
   assert.match(
     deploy,
-    /actions\/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e(?:.|\n)*?with:\n\s+timeout: 1800000/,
-    "the deployment may wait 30 minutes, while the job remains bounded at 35 minutes",
+    /PAGES_ARTIFACT_ID: \$\{\{ needs\.feed\.outputs\.pages_artifact_id \}\}/,
   );
-  assert.doesNotMatch(deploy, /timeout: 600000/);
 });
 
 test("post-release retries verify and resume an exact immutable release", () => {
