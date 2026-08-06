@@ -839,7 +839,6 @@ jobs:
           expected_prerelease=false
           create_flags=(
             --repo "$GITHUB_REPOSITORY"
-            --target "$COLONY_REQUEST_COMMIT"
             --title "$release_title"
             --notes "$release_body"
           )
@@ -873,12 +872,10 @@ jobs:
           verify_metadata() {
             jq -e \
               --arg tag "$COLONY_RELEASE_TAG" \
-              --arg target "$COLONY_REQUEST_COMMIT" \
               --arg title "$release_title" \
               --arg body "$release_body" \
               --argjson prerelease "$expected_prerelease" \
               '.tag_name == $tag
-                and .target_commitish == $target
                 and .name == $title
                 and .body == $body
                 and .prerelease == $prerelease
