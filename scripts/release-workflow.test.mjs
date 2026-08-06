@@ -132,6 +132,40 @@ test("public releases build an exact verified source revision on universal macOS
   assert.doesNotMatch(workflow, /git log -n 1 --format=%H --/);
 });
 
+test("Node provenance normalizes signatures without weakening the shipped signing policy", () => {
+  const build = job("source_build", "apple_sign");
+  assert.match(build, /codesign --verify --verbose=4 "\$staged_node"/);
+  assert.match(build, /Signature=adhoc/);
+  assert.match(
+    build,
+    /codesign -d --entitlements "\$provenance\/staged-node-entitlements\.plist" --xml "\$staged_node"/,
+  );
+  assert.match(build, /JitRuntimeEntitlements\.plist/);
+  assert.match(build, /cmp "\$provenance\/expected-node-entitlements\.json" \\\n+\s+"\$provenance\/staged-node-entitlements\.json"/);
+  assert.match(
+    build,
+    /normalize_macho\(\) \{(?:.|\n)*?cp "\$input" "\$output"(?:.|\n)*?codesign --remove-signature "\$output"/,
+  );
+  assert.equal(
+    build.match(/^\s+normalize_macho "[^\n]+$/gm)?.length,
+    4,
+    "both staged and pinned upstream slices must be normalized on copies",
+  );
+  assert.match(
+    build,
+    /cmp "\$provenance\/staged-node-arm64-unsigned" \\\n+\s+"\$provenance\/upstream-node-arm64-unsigned"/,
+  );
+  assert.match(
+    build,
+    /cmp "\$provenance\/staged-node-x64-unsigned" \\\n+\s+"\$provenance\/upstream-node-x64-unsigned"/,
+  );
+  assert.doesNotMatch(
+    build,
+    /codesign --remove-signature "\$(?:staged_node|arm_node|x64_node)"/,
+    "signature normalization must never mutate shipped or pristine upstream inputs",
+  );
+});
+
 test("the pinned minimal Rust toolchain installs formatter and linter components", () => {
   const sourceBuild = job("source_build", "apple_sign");
   const installStep = sourceBuild.slice(
