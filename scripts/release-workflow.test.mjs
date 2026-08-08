@@ -587,6 +587,23 @@ test("the fixed Colony source has its exact audited ZTC TUI lock", () => {
   );
 });
 
+test("the startup-update source reuses the unchanged audited ZTC TUI lock", () => {
+  const lockUrl = new URL(
+    "../locks/ztc-tui/3d4c253e1abe85c7db09ef67a0aacbff77736a08.Cargo.lock",
+    import.meta.url,
+  );
+  const lockBytes = existsSync(lockUrl)
+    ? readFileSync(lockUrl)
+    : Buffer.from("missing startup-update lock alias");
+  const digest = createHash("sha256").update(lockBytes).digest("hex");
+
+  assert.equal(
+    digest,
+    "66ac597a7048542a99371cc74398635ebea5fdda5327aac396122851e06d40e9",
+    "source 3d4c253e1 must select the unchanged reviewed dependency graph",
+  );
+});
+
 test("untrusted source output crosses only digest-checked fresh-runner artifacts", () => {
   const sourceBuild = job("source_build", "apple_sign");
   assert.match(job("apple_sign", "updater_sign"), /needs:\s*\[validate, source_build\]/);
