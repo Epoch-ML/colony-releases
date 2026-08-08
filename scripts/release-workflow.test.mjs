@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 const workflow = readFileSync(
@@ -567,6 +568,23 @@ test("pane-launch tests build the exact locked Rust TUI prerequisite", () => {
     "the native renderer must be built before pane-launch tests execute",
   );
   assert.doesNotMatch(testStep, /cargo build --release(?! --locked)/);
+});
+
+test("the fixed Colony source has its exact audited ZTC TUI lock", () => {
+  const lockUrl = new URL(
+    "../locks/ztc-tui/cba256f34d01eeabb637dd3b76f9a9f8d678aff8.Cargo.lock",
+    import.meta.url,
+  );
+  const lockBytes = existsSync(lockUrl)
+    ? readFileSync(lockUrl)
+    : Buffer.from("missing audited lock alias");
+  const digest = createHash("sha256").update(lockBytes).digest("hex");
+
+  assert.equal(
+    digest,
+    "66ac597a7048542a99371cc74398635ebea5fdda5327aac396122851e06d40e9",
+    "source cba256f34 must select the reviewed dependency graph without regenerating it",
+  );
 });
 
 test("untrusted source output crosses only digest-checked fresh-runner artifacts", () => {
